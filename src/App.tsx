@@ -10,6 +10,7 @@ import { ToastProvider } from './hooks/useToast';
 import { LoginView } from './components/auth/LoginView';
 import { AppLayout } from './components/layout/AppLayout';
 import { LoadingSpinner } from './components/common/LoadingSpinner';
+import { InstallPrompt } from './components/common/InstallPrompt';
 
 function MainRouter() {
   const { profile, loading } = useAuth();
@@ -35,6 +36,7 @@ export default function App() {
       <ToastProvider>
         <AuthProvider>
           <MainRouter />
+          <InstallPrompt />
         </AuthProvider>
       </ToastProvider>
     </ThemeProvider>
