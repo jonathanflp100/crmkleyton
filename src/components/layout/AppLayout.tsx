@@ -12,9 +12,9 @@ import { TasksView } from '../modules/tasks/TasksView';
 import { ReportsView } from '../modules/reports/ReportsView';
 import { SettingsView } from '../modules/settings/SettingsView';
 import { FirestoreService } from '../../services/firestoreService';
-import { DEFAULT_ACCOUNTS, DEFAULT_CATEGORIES, loadDemoData } from '../../services/demoDataService';
+import { DEFAULT_ACCOUNTS, DEFAULT_CATEGORIES, KANBAN_STAGES } from '../../services/demoDataService';
 import { useAuth } from '../../hooks/useAuth';
-import { isFirebaseConfigured } from '../../services/firebase';
+import { useToast } from '../../hooks/useToast';
 import type {
   Transaction,
   Client,
@@ -29,22 +29,29 @@ import type {
   CompanyProfile,
   UserProfile,
   DatePeriodFilter,
+  DateRange,
+  Transfer,
+  KanbanColumn,
 } from '../../types';
-import { format } from 'date-fns';
+import { format, startOfMonth } from 'date-fns';
+import { getPeriodRange } from '../../utils/period';
 
 export function AppLayout() {
-  const { profile, isAdmin, isDemoMode } = useAuth();
+  const { profile, isAdmin } = useAuth();
+  const { error } = useToast();
 
   const [currentModule, setCurrentModule] = useState<AppModule>('dashboard');
   const [period, setPeriod] = useState<DatePeriodFilter>('month');
+  const [customRange, setCustomRange] = useState<DateRange>({
+    start: format(startOfMonth(new Date()), 'yyyy-MM-dd'),
+    end: format(new Date(), 'yyyy-MM-dd'),
+  });
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-
-  // Quick Action trigger
   const [quickAction, setQuickAction] = useState<string | null>(null);
 
-  // Application Data States
+  // Dados (tempo real)
   const [company, setCompany] = useState<CompanyProfile | null>(null);
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [rawTransactions, setRawTransactions] = useState<Transaction[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
@@ -52,130 +59,130 @@ export function AppLayout() {
   const [interactions, setInteractions] = useState<DealInteraction[]>([]);
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [accounts, setAccounts] = useState<Account[]>(DEFAULT_ACCOUNTS);
+  const [rawAccounts, setRawAccounts] = useState<Account[]>([]);
+  const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [categories, setCategories] = useState<Category[]>(DEFAULT_CATEGORIES);
+  const [stages, setStages] = useState<KanbanColumn[]>(KANBAN_STAGES);
   const [usersList, setUsersList] = useState<UserProfile[]>([]);
 
-  // Real-time subscriptions
+  // Cria contas/categorias padrão no primeiro acesso do admin
   useEffect(() => {
-    if (!isFirebaseConfigured()) {
-      // In demo / preview mode without keys: auto-populate with initial mockup data if empty
-      return;
+    if (isAdmin) {
+      FirestoreService.ensureDefaults(
+        { accounts: DEFAULT_ACCOUNTS, categories: DEFAULT_CATEGORIES },
+        profile ? { uid: profile.uid, name: profile.name } : undefined
+      );
     }
+  }, [isAdmin]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // Company Profile
-    const unsubCompany = FirestoreService.subscribeDoc<CompanyProfile>(
-      'company',
-      'profile',
-      (data) => {
-        if (data) setCompany(data);
+  useEffect(() => {
+    let warned = false;
+    const onError = (e: Error) => {
+      if (!warned) {
+        warned = true;
+        error('Erro ao carregar dados', (e as any)?.code === 'permission-denied' ? 'Sem permissão. Verifique as regras do Firestore.' : e.message);
       }
-    );
-
-    // Collections
-    const unsubTrans = FirestoreService.subscribeCollection<Transaction>(
-      'transactions',
-      (data) => setTransactions(data)
-    );
-    const unsubClients = FirestoreService.subscribeCollection<Client>('clients', (data) =>
-      setClients(data)
-    );
-    const unsubSuppliers = FirestoreService.subscribeCollection<Supplier>(
-      'suppliers',
-      (data) => setSuppliers(data)
-    );
-    const unsubProducts = FirestoreService.subscribeCollection<Product>('products', (data) =>
-      setProducts(data)
-    );
-    const unsubDeals = FirestoreService.subscribeCollection<Deal>('deals', (data) =>
-      setDeals(data)
-    );
-    const unsubInteractions = FirestoreService.subscribeCollection<DealInteraction>(
-      'deal_interactions',
-      (data) => setInteractions(data)
-    );
-    const unsubProposals = FirestoreService.subscribeCollection<Proposal>(
-      'proposals',
-      (data) => setProposals(data)
-    );
-    const unsubTasks = FirestoreService.subscribeCollection<Task>('tasks', (data) =>
-      setTasks(data)
-    );
-    const unsubAccounts = FirestoreService.subscribeCollection<Account>('accounts', (data) => {
-      if (data && data.length > 0) setAccounts(data);
-    });
-    const unsubCategories = FirestoreService.subscribeCollection<Category>(
-      'categories',
-      (data) => {
-        if (data && data.length > 0) setCategories(data);
-      }
-    );
-    const unsubUsers = FirestoreService.subscribeCollection<UserProfile>('users', (data) =>
-      setUsersList(data)
-    );
-
-    return () => {
-      unsubCompany();
-      unsubTrans();
-      unsubClients();
-      unsubSuppliers();
-      unsubProducts();
-      unsubDeals();
-      unsubInteractions();
-      unsubProposals();
-      unsubTasks();
-      unsubAccounts();
-      unsubCategories();
-      unsubUsers();
     };
-  }, []);
+    const sub = <T,>(col: string, set: (items: T[]) => void) => FirestoreService.subscribeCollection<T>(col, set, onError);
 
-  // Calculate overdue tasks count for the badge
+    const unsubs = [
+      FirestoreService.subscribeDoc<CompanyProfile>('company', 'profile', (d) => setCompany(d)),
+      FirestoreService.subscribeDoc<{ stages: KanbanColumn[] }>('company', 'kanban', (d) => {
+        if (d?.stages?.length) setStages(normalizeStages(d.stages));
+      }),
+      sub<Transaction>('transactions', setRawTransactions),
+      sub<Client>('clients', (d) => setClients(sortByName(d))),
+      sub<Supplier>('suppliers', (d) => setSuppliers(sortByName(d))),
+      sub<Product>('products', (d) => setProducts(sortByName(d))),
+      sub<Deal>('deals', setDeals),
+      sub<DealInteraction>('deal_interactions', setInteractions),
+      sub<Proposal>('proposals', (d) => setProposals([...d].sort((a, b) => (b.number || '').localeCompare(a.number || '')))),
+      sub<Task>('tasks', setTasks),
+      sub<Account>('accounts', (d) => setRawAccounts([...d].sort((a, b) => Number(Boolean(b.isDefault)) - Number(Boolean(a.isDefault)) || a.name.localeCompare(b.name)))),
+      sub<Transfer>('transfers', setTransfers),
+      sub<Category>('categories', (d) => {
+        if (d.length) setCategories([...d].sort((a, b) => a.name.localeCompare(b.name)));
+      }),
+    ];
+    if (isAdmin) unsubs.push(sub<UserProfile>('users', setUsersList));
+    return () => unsubs.forEach((u) => u());
+  }, [isAdmin]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const todayStr = format(new Date(), 'yyyy-MM-dd');
-  const overdueTasksCount = useMemo(() => {
-    return tasks.filter((t) => t.status === 'pending' && t.dueDate < todayStr).length;
-  }, [tasks, todayStr]);
+
+  // Status "vencido" é automático: pendente com vencimento antes de hoje
+  const transactions = useMemo(
+    () =>
+      rawTransactions
+        .map((t) => (t.status !== 'paid' && t.dueDate && t.dueDate < todayStr ? { ...t, status: 'overdue' as const } : t.status === 'overdue' && t.dueDate >= todayStr ? { ...t, status: 'pending' as const } : t))
+        .sort((a, b) => (b.dueDate || '').localeCompare(a.dueDate || '') || (b.createdAt || '').localeCompare(a.createdAt || '')),
+    [rawTransactions, todayStr]
+  );
+
+  // Saldo de cada conta = saldo inicial + recebido - pago + transferências
+  const accounts = useMemo(() => {
+    const list = rawAccounts.length ? rawAccounts : DEFAULT_ACCOUNTS;
+    return list.map((acc) => {
+      let balance = acc.initialBalance || 0;
+      rawTransactions.forEach((t) => {
+        if (t.status === 'paid' && t.accountId === acc.id) balance += t.type === 'income' ? t.amount : -t.amount;
+      });
+      transfers.forEach((tr) => {
+        if (tr.fromAccountId === acc.id) balance -= tr.amount;
+        if (tr.toAccountId === acc.id) balance += tr.amount;
+      });
+      return { ...acc, currentBalance: balance };
+    });
+  }, [rawAccounts, rawTransactions, transfers]);
+
+  const range = useMemo(() => getPeriodRange(period, customRange), [period, customRange]);
+
+  const overdueTasksCount = useMemo(
+    () => tasks.filter((t) => t.status === 'pending' && t.dueDate < todayStr).length,
+    [tasks, todayStr]
+  );
 
   const handleQuickAction = (action: string) => {
     setQuickAction(action);
-    if (action === 'new_income' || action === 'new_expense') {
-      setCurrentModule('financial');
-    } else if (action === 'new_deal') {
-      setCurrentModule('crm');
-    } else if (action === 'new_client') {
-      setCurrentModule('clients');
-    } else if (action === 'new_proposal') {
-      setCurrentModule('proposals');
-    } else if (action === 'new_task') {
-      setCurrentModule('tasks');
-    }
+    const target: Record<string, AppModule> = {
+      new_income: 'financial',
+      new_expense: 'financial',
+      new_deal: 'crm',
+      new_client: 'clients',
+      new_proposal: 'proposals',
+      new_task: 'tasks',
+    };
+    if (target[action]) setCurrentModule(target[action]);
   };
+
+  const clearQuick = () => setQuickAction(null);
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col antialiased">
-      {/* Sidebar */}
       <Sidebar
         currentModule={currentModule}
-        onSelectModule={setCurrentModule}
+        onSelectModule={(m) => {
+          setCurrentModule(m);
+          setQuickAction(null);
+        }}
         overdueTasksCount={overdueTasksCount}
         companyName={company?.tradingName || company?.name || 'Gestor Pro'}
+        logoUrl={company?.logoUrl}
         isOpenMobile={isMobileMenuOpen}
         onCloseMobile={() => setIsMobileMenuOpen(false)}
       />
 
-      {/* Main Content Area */}
       <div className="lg:pl-64 flex flex-col flex-1 min-w-0 transition-all duration-300">
-        {/* Header */}
         <Header
           currentModule={currentModule}
           period={period}
           onPeriodChange={setPeriod}
+          customRange={customRange}
+          onCustomRangeChange={setCustomRange}
           onOpenMobileMenu={() => setIsMobileMenuOpen(true)}
           onQuickAction={handleQuickAction}
-          companyName={company?.name}
         />
 
-        {/* Page Content */}
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto">
           {currentModule === 'dashboard' && (
             <DashboardView
@@ -183,30 +190,29 @@ export function AppLayout() {
               deals={deals}
               accounts={accounts}
               categories={categories}
+              stages={stages}
+              tasks={tasks}
+              products={products}
               period={period}
+              range={range}
               onNavigateTo={setCurrentModule}
-              onNewTransaction={(type) => {
-                setQuickAction(type === 'income' ? 'new_income' : 'new_expense');
-                setCurrentModule('financial');
-              }}
             />
           )}
 
           {currentModule === 'financial' && (
             <FinancialView
+              key={quickAction || 'financial'}
               transactions={transactions}
               accounts={accounts}
               categories={categories}
               clients={clients}
               suppliers={suppliers}
-              openCreateWith={
-                quickAction === 'new_income'
-                  ? 'income'
-                  : quickAction === 'new_expense'
-                  ? 'expense'
-                  : null
-              }
-              onClearQuickAction={() => setQuickAction(null)}
+              transfers={transfers}
+              company={company}
+              period={period}
+              range={range}
+              openCreateWith={quickAction === 'new_income' ? 'income' : quickAction === 'new_expense' ? 'expense' : null}
+              onClearQuickAction={clearQuick}
             />
           )}
 
@@ -215,8 +221,11 @@ export function AppLayout() {
               deals={deals}
               clients={clients}
               interactions={interactions}
+              tasks={tasks}
+              accounts={accounts}
+              stages={stages}
               openCreateDeal={quickAction === 'new_deal'}
-              onClearQuickAction={() => setQuickAction(null)}
+              onClearQuickAction={clearQuick}
             />
           )}
 
@@ -226,13 +235,14 @@ export function AppLayout() {
               transactions={transactions}
               deals={deals}
               tasks={tasks}
+              company={company}
               openCreateClient={quickAction === 'new_client'}
-              onClearQuickAction={() => setQuickAction(null)}
+              onClearQuickAction={clearQuick}
             />
           )}
 
           {currentModule === 'suppliers' && (
-            <SuppliersView suppliers={suppliers} transactions={transactions} />
+            <SuppliersView suppliers={suppliers} transactions={transactions} company={company} />
           )}
 
           {currentModule === 'products' && <ProductsView products={products} />}
@@ -243,9 +253,10 @@ export function AppLayout() {
               clients={clients}
               products={products}
               accounts={accounts}
+              categories={categories}
               company={company}
               openCreateProposal={quickAction === 'new_proposal'}
-              onClearQuickAction={() => setQuickAction(null)}
+              onClearQuickAction={clearQuick}
             />
           )}
 
@@ -254,8 +265,9 @@ export function AppLayout() {
               tasks={tasks}
               clients={clients}
               deals={deals}
+              users={usersList}
               openCreateTask={quickAction === 'new_task'}
-              onClearQuickAction={() => setQuickAction(null)}
+              onClearQuickAction={clearQuick}
             />
           )}
 
@@ -263,18 +275,37 @@ export function AppLayout() {
             <ReportsView
               transactions={transactions}
               clients={clients}
+              suppliers={suppliers}
               products={products}
+              proposals={proposals}
               deals={deals}
+              stages={stages}
+              accounts={accounts}
+              transfers={transfers}
               categories={categories}
               company={company}
+              globalPeriod={period}
+              globalRange={customRange}
             />
           )}
 
           {currentModule === 'settings' && (
-            <SettingsView company={company} users={usersList} />
+            <SettingsView company={company} users={usersList} stages={stages} />
           )}
         </main>
       </div>
     </div>
   );
+}
+
+function sortByName<T extends { name?: string }>(items: T[]): T[] {
+  return [...items].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+}
+
+/** Garante que "ganho" e "perdido" sempre existam e fiquem no final */
+export function normalizeStages(stages: KanbanColumn[]): KanbanColumn[] {
+  const middle = stages.filter((s) => s.id !== 'ganho' && s.id !== 'perdido' && !s.isWon && !s.isLost);
+  const won = stages.find((s) => s.id === 'ganho') || KANBAN_STAGES[3];
+  const lost = stages.find((s) => s.id === 'perdido') || KANBAN_STAGES[4];
+  return [...middle, { ...won, id: 'ganho', isWon: true }, { ...lost, id: 'perdido', isLost: true }];
 }

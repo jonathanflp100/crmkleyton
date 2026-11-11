@@ -13,25 +13,31 @@ import {
   CheckSquare,
 } from 'lucide-react';
 import type { AppModule } from './Sidebar';
-import type { DatePeriodFilter } from '../../types';
+import type { DatePeriodFilter, DateRange } from '../../types';
 import { useAuth } from '../../hooks/useAuth';
+import { PERIOD_OPTIONS } from '../../utils/period';
 
 interface HeaderProps {
   currentModule: AppModule;
   period: DatePeriodFilter;
   onPeriodChange: (p: DatePeriodFilter) => void;
+  customRange: DateRange;
+  onCustomRangeChange: (r: DateRange) => void;
   onOpenMobileMenu: () => void;
   onQuickAction?: (action: string) => void;
-  companyName?: string;
 }
+
+/** Módulos onde o filtro de período do topo faz efeito */
+const PERIOD_MODULES: AppModule[] = ['dashboard', 'financial'];
 
 export function Header({
   currentModule,
   period,
   onPeriodChange,
+  customRange,
+  onCustomRangeChange,
   onOpenMobileMenu,
   onQuickAction,
-  companyName,
 }: HeaderProps) {
   const [showQuickMenu, setShowQuickMenu] = useState(false);
   const { isDemoMode, switchDemoRole, isAdmin } = useAuth();
@@ -51,12 +57,9 @@ export function Header({
 
   const currentInfo = moduleTitles[currentModule] || { title: 'Gestor Pro', subtitle: '' };
 
-  const periods: { id: DatePeriodFilter; label: string }[] = [
-    { id: 'today', label: 'Hoje' },
-    { id: 'week', label: 'Esta Semana' },
-    { id: 'month', label: 'Este Mês' },
-    { id: 'year', label: 'Este Ano' },
-  ];
+  const showPeriod = PERIOD_MODULES.includes(currentModule);
+  const inputCls =
+    'px-2 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-200';
 
   return (
     <header className="sticky top-0 z-30 bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 transition-colors no-print">
@@ -97,22 +100,40 @@ export function Header({
             </div>
           )}
 
-          {/* Period selector */}
-          <div className="hidden md:flex items-center bg-slate-100 dark:bg-slate-800/90 p-1 rounded-xl border border-slate-200/80 dark:border-slate-700/80">
-            {periods.map((p) => (
-              <button
-                key={p.id}
-                onClick={() => onPeriodChange(p.id)}
-                className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all ${
-                  period === p.id
-                    ? 'bg-white dark:bg-slate-700 text-blue-600 dark:text-white shadow-xs'
-                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-                }`}
+          {/* Seletor de período */}
+          {showPeriod && (
+            <div className="flex items-center gap-1.5 flex-wrap justify-end">
+              <select
+                value={period}
+                onChange={(e) => onPeriodChange(e.target.value as DatePeriodFilter)}
+                className={`${inputCls} font-semibold`}
+                title="Período"
               >
-                {p.label}
-              </button>
-            ))}
-          </div>
+                {PERIOD_OPTIONS.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+              {period === 'custom' && (
+                <>
+                  <input
+                    type="date"
+                    value={customRange.start}
+                    onChange={(e) => onCustomRangeChange({ ...customRange, start: e.target.value })}
+                    className={inputCls}
+                  />
+                  <span className="text-xs text-slate-400">até</span>
+                  <input
+                    type="date"
+                    value={customRange.end}
+                    onChange={(e) => onCustomRangeChange({ ...customRange, end: e.target.value })}
+                    className={inputCls}
+                  />
+                </>
+              )}
+            </div>
+          )}
 
           {/* Quick Action "+ Novo" Dropdown */}
           <div className="relative">

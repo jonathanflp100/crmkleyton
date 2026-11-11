@@ -1,62 +1,110 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Building2,
   Users,
   Database,
   Upload,
   Download,
-  Shield,
   ShieldAlert,
   Sparkles,
   Trash2,
   Save,
-  CheckCircle,
-  AlertTriangle,
   UserPlus,
   Power,
-  RotateCcw,
+  KanbanSquare,
+  Plus,
+  ArrowUp,
+  ArrowDown,
+  ImagePlus,
+  Info,
 } from 'lucide-react';
-import type { CompanyProfile, UserProfile, UserRole } from '../../../types';
+import type { CompanyProfile, KanbanColumn, UserProfile, UserRole } from '../../../types';
 import { FirestoreService } from '../../../services/firestoreService';
 import { ExportService } from '../../../services/exportService';
 import { loadDemoData, clearDemoData } from '../../../services/demoDataService';
 import { AuthService } from '../../../services/authService';
-import { useAuth } from '../../../hooks/useAuth';
+import { friendlyFirebaseError } from '../../../services/firebase';
+import { useAuth, useActor } from '../../../hooks/useAuth';
 import { useToast } from '../../../hooks/useToast';
 import { Modal } from '../../common/Modal';
 import { ConfirmDialog } from '../../common/ConfirmDialog';
 import { Badge } from '../../common/Badge';
+import { AddressFields, type AddressValue } from '../../common/AddressFields';
+import { inputCls, labelCls, btnPrimary, btnSecondary, btnIcon, cardCls } from '../../common/ui';
+import { maskDocumentInput, validateRUC } from '../../../utils/formatters';
 
 interface SettingsViewProps {
   company: CompanyProfile | null;
   users: UserProfile[];
+  stages: KanbanColumn[];
 }
 
-export function SettingsView({ company, users }: SettingsViewProps) {
+type Tab = 'company' | 'funnel' | 'users' | 'backup' | 'demo';
+
+const emptyCompany = {
+  name: '',
+  tradingName: '',
+  document: '',
+  email: '',
+  phone: '',
+  whatsapp: '',
+  website: '',
+  street: '',
+  number: '',
+  complement: '',
+  neighborhood: '',
+  city: '',
+  state: '',
+  logoUrl: '',
+  receiptNotes: '',
+};
+
+/** Reduz a imagem do logo para caber no banco (máx. ~300px) */
+function resizeImage(file: File, max = 320): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Não foi possível ler a imagem.'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Arquivo de imagem inválido.'));
+      img.onload = () => {
+        const scale = Math.min(1, max / Math.max(img.width, img.height));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        canvas.getContext('2d')!.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL('image/png'));
+      };
+      img.src = reader.result as string;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+export function SettingsView({ company, users, stages }: SettingsViewProps) {
   const { profile, isAdmin, isConfigured } = useAuth();
+  const actor = useActor();
   const { success, error, info } = useToast();
+  const [activeTab, setActiveTab] = useState<Tab>('company');
 
-  const [activeTab, setActiveTab] = useState<'company' | 'users' | 'backup' | 'demo'>('company');
+  // Empresa
+  const [form, setForm] = useState({ ...emptyCompany });
+  const [dirty, setDirty] = useState(false);
+  useEffect(() => {
+    // carrega os dados quando chegam do banco (sem apagar o que a pessoa está digitando)
+    if (company && !dirty) setForm({ ...emptyCompany, ...(company as any) });
+  }, [company]); // eslint-disable-line react-hooks/exhaustive-deps
+  const set = (patch: Partial<typeof form>) => {
+    setForm((f) => ({ ...f, ...patch }));
+    setDirty(true);
+  };
+  const logoInput = useRef<HTMLInputElement>(null);
 
-  // Company profile form
-  const [name, setName] = useState(company?.name || '');
-  const [tradingName, setTradingName] = useState(company?.tradingName || '');
-  const [document, setDocument] = useState(company?.document || '');
-  const [email, setEmail] = useState(company?.email || '');
-  const [phone, setPhone] = useState(company?.phone || '');
-  const [whatsapp, setWhatsapp] = useState(company?.whatsapp || '');
-  const [website, setWebsite] = useState(company?.website || '');
-  const [cep, setCep] = useState(company?.cep || '');
-  const [street, setStreet] = useState(company?.street || '');
-  const [number, setNumber] = useState(company?.number || '');
-  const [complement, setComplement] = useState(company?.complement || '');
-  const [neighborhood, setNeighborhood] = useState(company?.neighborhood || '');
-  const [city, setCity] = useState(company?.city || '');
-  const [state, setState] = useState(company?.state || '');
-  const [logoUrl, setLogoUrl] = useState(company?.logoUrl || '');
-  const [receiptNotes, setReceiptNotes] = useState(company?.receiptNotes || '');
+  // Funil
+  const [stageDraft, setStageDraft] = useState<KanbanColumn[]>(stages);
+  useEffect(() => setStageDraft(stages), [stages]);
 
-  // New User Form Modal
+  // Usuários
   const [isNewUserModalOpen, setIsNewUserModalOpen] = useState(false);
   const [newUserName, setNewUserName] = useState('');
   const [newUserEmail, setNewUserEmail] = useState('');
@@ -64,397 +112,352 @@ export function SettingsView({ company, users }: SettingsViewProps) {
   const [newUserRole, setNewUserRole] = useState<UserRole>('employee');
   const [isCreatingUser, setIsCreatingUser] = useState(false);
 
-  // Backup Import File Input
-  const [importJsonText, setImportJsonText] = useState('');
+  // Backup / demo
   const [isImporting, setIsImporting] = useState(false);
-
-  // Demo data loaders
+  const [pendingImport, setPendingImport] = useState<{ name: string; data: any } | null>(null);
+  const backupInput = useRef<HTMLInputElement>(null);
   const [isLoadingDemo, setIsLoadingDemo] = useState(false);
-  const [isClearingDemo, setIsClearingDemo] = useState(false);
   const [confirmClearDemo, setConfirmClearDemo] = useState(false);
 
   if (!isAdmin) {
     return (
-      <div className="p-8 text-center bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800">
+      <div className={`${cardCls} p-8 text-center`}>
         <ShieldAlert className="w-12 h-12 text-rose-500 mx-auto mb-3" />
-        <h3 className="text-base font-bold text-slate-900 dark:text-white">
-          Acesso Restrito
-        </h3>
-        <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1">
-          Apenas usuários com perfil de Administrador têm permissão para acessar as configurações do sistema.
-        </p>
+        <h3 className="text-base font-bold text-slate-900 dark:text-white">Acesso restrito</h3>
+        <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1">Só administradores podem acessar as configurações.</p>
       </div>
     );
   }
 
   const handleSaveCompany = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (form.document && form.document.includes('-') && !validateRUC(form.document)) {
+      info('Atenção: o dígito verificador do RUC parece incorreto. Os dados foram salvos mesmo assim.');
+    }
     try {
-      await FirestoreService.updateCompanyProfile(
-        {
-          name,
-          tradingName,
-          document,
-          email,
-          phone,
-          whatsapp,
-          website,
-          cep,
-          street,
-          number,
-          complement,
-          neighborhood,
-          city,
-          state,
-          logoUrl,
-          receiptNotes,
-        },
-        profile ? { uid: profile.uid, name: profile.name } : undefined
-      );
-      success('Dados da empresa atualizados com sucesso!');
+      await FirestoreService.updateCompanyProfile(form as CompanyProfile, actor);
+      setDirty(false);
+      success('Dados da empresa salvos!');
     } catch (err: any) {
-      error('Erro ao salvar dados da empresa', err?.message);
+      error('Erro ao salvar', friendlyFirebaseError(err));
     }
   };
 
+  const handleLogo = async (file?: File) => {
+    if (!file) return;
+    try {
+      const dataUrl = await resizeImage(file);
+      set({ logoUrl: dataUrl });
+      info('Logo carregado. Clique em "Salvar" para gravar.');
+    } catch (err: any) {
+      error(err.message);
+    }
+  };
+
+  /* ---- Funil ---- */
+  const middleStages = stageDraft.filter((s) => !s.isWon && !s.isLost);
+  const fixedStages = stageDraft.filter((s) => s.isWon || s.isLost);
+  const updateStage = (id: string, patch: Partial<KanbanColumn>) => setStageDraft((l) => l.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+  const moveStage = (id: string, dir: -1 | 1) => {
+    const list = [...middleStages];
+    const i = list.findIndex((s) => s.id === id);
+    const j = i + dir;
+    if (j < 0 || j >= list.length) return;
+    [list[i], list[j]] = [list[j], list[i]];
+    setStageDraft([...list, ...fixedStages]);
+  };
+  const addStage = () => setStageDraft([...middleStages, { id: `etapa_${Date.now().toString(36)}`, title: 'Nova etapa', color: '#8b5cf6' }, ...fixedStages]);
+  const removeStage = (id: string) => setStageDraft(stageDraft.filter((s) => s.id !== id));
+  const saveStages = async () => {
+    if (stageDraft.some((s) => !s.title.trim())) return error('Todas as etapas precisam de nome.');
+    try {
+      await FirestoreService.saveKanbanStages(stageDraft, actor);
+      success('Etapas do funil salvas!');
+    } catch (err: any) {
+      error('Erro ao salvar etapas', friendlyFirebaseError(err));
+    }
+  };
+
+  /* ---- Usuários ---- */
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newUserEmail || !newUserPass || !newUserName) {
-      error('Preencha todos os campos do usuário.');
-      return;
-    }
-    if (newUserPass.length < 6) {
-      error('A senha deve ter pelo menos 6 caracteres.');
-      return;
-    }
-
+    if (!newUserEmail || !newUserPass || !newUserName) return error('Preencha todos os campos.');
+    if (newUserPass.length < 6) return error('A senha precisa ter pelo menos 6 caracteres.');
     setIsCreatingUser(true);
     try {
-      await AuthService.createUser(
-        newUserEmail,
-        newUserPass,
-        newUserName,
-        newUserRole,
-        profile?.uid
-      );
-      success(`Usuário ${newUserName} criado com sucesso!`);
+      await AuthService.createUser(newUserEmail, newUserPass, newUserName, newUserRole, profile?.uid);
+      success(`Usuário ${newUserName} criado!`, `Passe o e-mail e a senha para ${newUserName} entrar.`);
       setIsNewUserModalOpen(false);
       setNewUserName('');
       setNewUserEmail('');
       setNewUserPass('');
+      setNewUserRole('employee');
     } catch (err: any) {
-      error('Erro ao criar usuário', err?.message);
+      error('Erro ao criar usuário', friendlyFirebaseError(err));
     } finally {
       setIsCreatingUser(false);
     }
   };
 
-  const handleToggleUserStatus = async (user: UserProfile) => {
+  const toggleStatus = async (u: UserProfile) => {
+    if (u.uid === profile?.uid) return error('Você não pode desativar a sua própria conta.');
     try {
-      await FirestoreService.setUserStatus(
-        user.uid,
-        !user.active,
-        profile ? { uid: profile.uid, name: profile.name } : undefined
-      );
-      success(`Usuário ${user.name} ${!user.active ? 'ativado' : 'desativado'}.`);
+      await FirestoreService.setUserStatus(u.uid, !u.active, actor);
+      success(`${u.name} ${!u.active ? 'reativado' : 'desativado'}.`);
     } catch (err: any) {
-      error('Erro ao alterar status do usuário', err?.message);
+      error('Erro ao alterar status', friendlyFirebaseError(err));
     }
   };
 
-  const handleToggleUserRole = async (user: UserProfile) => {
-    const newRole: UserRole = user.role === 'admin' ? 'employee' : 'admin';
+  const toggleRole = async (u: UserProfile) => {
+    if (u.uid === profile?.uid) return error('Você não pode mudar o seu próprio perfil.');
+    const role: UserRole = u.role === 'admin' ? 'employee' : 'admin';
     try {
-      await FirestoreService.setUserRole(
-        user.uid,
-        newRole,
-        profile ? { uid: profile.uid, name: profile.name } : undefined
-      );
-      success(`Perfil de ${user.name} alterado para ${newRole}.`);
+      await FirestoreService.setUserRole(u.uid, role, actor);
+      success(`${u.name} agora é ${role === 'admin' ? 'administrador' : 'funcionário'}.`);
     } catch (err: any) {
-      error('Erro ao alterar perfil', err?.message);
+      error('Erro ao alterar perfil', friendlyFirebaseError(err));
     }
   };
 
+  /* ---- Backup ---- */
   const handleExportBackup = async () => {
-    info('Gerando arquivo de backup...');
+    info('Gerando backup...');
     try {
       const data = await FirestoreService.exportAllData();
-      ExportService.exportToJSON(`Backup_GestorPro_${Date.now()}`, data);
-      success('Backup baixado com sucesso!');
+      ExportService.exportToJSON(`Backup_GestorPro_${new Date().toISOString().slice(0, 10)}`, data);
+      success('Backup baixado!', 'Guarde o arquivo em local seguro (Google Drive, pendrive...).');
     } catch (err: any) {
-      error('Erro ao exportar backup', err?.message);
+      error('Erro ao gerar backup', friendlyFirebaseError(err));
     }
   };
 
-  const handleImportBackup = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!importJsonText.trim()) return;
+  const handleBackupFile = async (file?: File) => {
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      setPendingImport({ name: file.name, data });
+    } catch {
+      error('Arquivo inválido', 'Escolha um arquivo .json gerado pelo botão "Baixar backup".');
+    }
+    if (backupInput.current) backupInput.current.value = '';
+  };
 
+  const confirmImport = async () => {
+    if (!pendingImport) return;
     setIsImporting(true);
     try {
-      const parsed = JSON.parse(importJsonText);
-      await FirestoreService.importAllData(
-        parsed,
-        profile ? { uid: profile.uid, name: profile.name } : undefined
-      );
-      success('Dados restaurados com sucesso a partir do backup!');
-      setImportJsonText('');
+      const n = await FirestoreService.importAllData(pendingImport.data, actor);
+      success(`Backup restaurado (${n} registros).`);
     } catch (err: any) {
-      error('Falha ao restaurar backup. Verifique se o JSON é válido.', err?.message);
+      error('Falha ao restaurar', friendlyFirebaseError(err));
     } finally {
       setIsImporting(false);
+      setPendingImport(null);
     }
   };
 
   const handleLoadDemo = async () => {
     setIsLoadingDemo(true);
     try {
-      await loadDemoData(profile ? { uid: profile.uid, name: profile.name } : undefined);
-      success('Dados de demonstração carregados com sucesso! Clientes, 6 meses de transações e funil prontos.');
+      await loadDemoData(actor);
+      success('Dados de demonstração carregados!');
     } catch (err: any) {
-      error('Erro ao carregar dados de demonstração', err?.message);
+      error('Erro ao carregar demonstração', friendlyFirebaseError(err));
     } finally {
       setIsLoadingDemo(false);
     }
   };
 
   const handleClearDemo = async () => {
-    setIsClearingDemo(true);
     try {
-      await clearDemoData(profile ? { uid: profile.uid, name: profile.name } : undefined);
-      success('Dados de demonstração apagados do banco de dados.');
-      setConfirmClearDemo(false);
+      const n = await clearDemoData(actor);
+      success(n ? `${n} registros de demonstração apagados.` : 'Não havia dados de demonstração.');
     } catch (err: any) {
-      error('Erro ao apagar dados', err?.message);
-    } finally {
-      setIsClearingDemo(false);
+      error('Erro ao apagar', friendlyFirebaseError(err));
     }
+    setConfirmClearDemo(false);
+  };
+
+  const tabs: { id: Tab; label: string; icon: React.ElementType }[] = [
+    { id: 'company', label: 'Dados da empresa', icon: Building2 },
+    { id: 'funnel', label: 'Etapas do funil', icon: KanbanSquare },
+    { id: 'users', label: 'Usuários', icon: Users },
+    { id: 'backup', label: 'Backup', icon: Database },
+    { id: 'demo', label: 'Demonstração', icon: Sparkles },
+  ];
+
+  const address: AddressValue = {
+    street: form.street,
+    number: form.number,
+    complement: form.complement,
+    neighborhood: form.neighborhood,
+    city: form.city,
+    state: form.state,
   };
 
   return (
     <div className="space-y-6">
-      {/* Navigation tabs */}
       <div className="flex items-center gap-2 overflow-x-auto border-b border-slate-200 dark:border-slate-800 pb-2 text-xs">
-        <button
-          onClick={() => setActiveTab('company')}
-          className={`px-4 py-2 rounded-xl font-bold transition-all flex items-center gap-2 ${
-            activeTab === 'company'
-              ? 'bg-blue-600 text-white shadow-xs'
-              : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-          }`}
-        >
-          <Building2 className="w-4 h-4" />
-          Dados da Empresa
-        </button>
-
-        <button
-          onClick={() => setActiveTab('users')}
-          className={`px-4 py-2 rounded-xl font-bold transition-all flex items-center gap-2 ${
-            activeTab === 'users'
-              ? 'bg-blue-600 text-white shadow-xs'
-              : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-          }`}
-        >
-          <Users className="w-4 h-4" />
-          Gestão de Usuários
-        </button>
-
-        <button
-          onClick={() => setActiveTab('backup')}
-          className={`px-4 py-2 rounded-xl font-bold transition-all flex items-center gap-2 ${
-            activeTab === 'backup'
-              ? 'bg-blue-600 text-white shadow-xs'
-              : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-          }`}
-        >
-          <Database className="w-4 h-4" />
-          Backup & Restauração
-        </button>
-
-        <button
-          onClick={() => setActiveTab('demo')}
-          className={`px-4 py-2 rounded-xl font-bold transition-all flex items-center gap-2 ${
-            activeTab === 'demo'
-              ? 'bg-blue-600 text-white shadow-xs'
-              : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-          }`}
-        >
-          <Sparkles className="w-4 h-4 text-amber-400" />
-          Dados de Demonstração
-        </button>
+        {tabs.map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setActiveTab(t.id)}
+            className={`px-4 py-2 rounded-xl font-bold transition-all flex items-center gap-2 whitespace-nowrap ${
+              activeTab === t.id ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+            }`}
+          >
+            <t.icon className="w-4 h-4" />
+            {t.label}
+          </button>
+        ))}
       </div>
 
-      {/* TAB 1: DADOS DA EMPRESA */}
+      {/* EMPRESA */}
       {activeTab === 'company' && (
-        <form onSubmit={handleSaveCompany} className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 shadow-xs space-y-4 text-xs">
+        <form onSubmit={handleSaveCompany} className={`${cardCls} p-6 space-y-4 text-xs`}>
           <div>
-            <h3 className="text-base font-bold text-slate-900 dark:text-white">
-              Identificação & Dados da Empresa
-            </h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-              Estes dados serão impressos nos cabeçalhos de orçamentos, recibos de pagamento e relatórios
-            </p>
+            <h3 className="text-base font-bold text-slate-900 dark:text-white">Dados da empresa</h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Aparecem no cabeçalho dos orçamentos, recibos, fichas e relatórios.</p>
+          </div>
+
+          <div className="flex items-center gap-4">
+            <div className="w-24 h-24 rounded-2xl border-2 border-dashed border-slate-300 dark:border-slate-700 flex items-center justify-center overflow-hidden bg-slate-50 dark:bg-slate-800">
+              {form.logoUrl ? <img src={form.logoUrl} alt="Logo" className="max-w-full max-h-full object-contain" /> : <ImagePlus className="w-8 h-8 text-slate-300" />}
+            </div>
+            <div className="space-y-2">
+              <input ref={logoInput} type="file" accept="image/*" className="hidden" onChange={(e) => handleLogo(e.target.files?.[0])} />
+              <button type="button" onClick={() => logoInput.current?.click()} className={`${btnSecondary} text-xs flex items-center gap-1.5`}>
+                <Upload className="w-3.5 h-3.5" /> Enviar logo
+              </button>
+              {form.logoUrl && (
+                <button type="button" onClick={() => set({ logoUrl: '' })} className="text-rose-600 text-xs font-semibold block">
+                  Remover logo
+                </button>
+              )}
+              <p className="text-[10px] text-slate-400">PNG ou JPG. A imagem é reduzida automaticamente.</p>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1">
-              <label className="font-semibold text-slate-700 dark:text-slate-300">
-                Razão Social *
-              </label>
-              <input
-                type="text"
-                required
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-              />
+              <label className={labelCls}>Razão social *</label>
+              <input type="text" required value={form.name} onChange={(e) => set({ name: e.target.value })} className={inputCls} />
             </div>
-
             <div className="space-y-1">
-              <label className="font-semibold text-slate-700 dark:text-slate-300">
-                Nome Fantasia
-              </label>
-              <input
-                type="text"
-                value={tradingName}
-                onChange={(e) => setTradingName(e.target.value)}
-                className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div className="space-y-1">
-              <label className="font-semibold text-slate-700 dark:text-slate-300">
-                CNPJ *
-              </label>
-              <input
-                type="text"
-                required
-                value={document}
-                onChange={(e) => setDocument(e.target.value)}
-                className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 font-mono text-slate-900 dark:text-slate-100"
-              />
-            </div>
-
-            <div className="space-y-1">
-              <label className="font-semibold text-slate-700 dark:text-slate-300">
-                Telefone de Contato
-              </label>
-              <input
-                type="text"
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-                className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-              />
-            </div>
-
-            <div className="space-y-1">
-              <label className="font-semibold text-slate-700 dark:text-slate-300">
-                E-mail Institucional
-              </label>
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-              />
+              <label className={labelCls}>Nome fantasia</label>
+              <input type="text" value={form.tradingName} onChange={(e) => set({ tradingName: e.target.value })} className={inputCls} />
             </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
             <div className="space-y-1">
-              <label className="font-semibold text-slate-700 dark:text-slate-300">CEP</label>
-              <input
-                type="text"
-                value={cep}
-                onChange={(e) => setCep(e.target.value)}
-                className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 font-mono"
-              />
+              <label className={labelCls}>RUC</label>
+              <input type="text" inputMode="numeric" placeholder="80012345-6" value={form.document} onChange={(e) => set({ document: maskDocumentInput(e.target.value) })} className={`${inputCls} font-mono`} />
             </div>
-
-            <div className="sm:col-span-2 space-y-1">
-              <label className="font-semibold text-slate-700 dark:text-slate-300">Logradouro / Rua</label>
-              <input
-                type="text"
-                value={street}
-                onChange={(e) => setStreet(e.target.value)}
-                className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800"
-              />
-            </div>
-
             <div className="space-y-1">
-              <label className="font-semibold text-slate-700 dark:text-slate-300">Cidade / UF</label>
-              <input
-                type="text"
-                value={city ? `${city}/${state}` : ''}
-                onChange={(e) => setCity(e.target.value)}
-                className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800"
-              />
+              <label className={labelCls}>Telefone</label>
+              <input type="tel" placeholder="021 123 456" value={form.phone} onChange={(e) => set({ phone: e.target.value })} className={inputCls} />
+            </div>
+            <div className="space-y-1">
+              <label className={labelCls}>WhatsApp</label>
+              <input type="tel" placeholder="0981 123 456" value={form.whatsapp} onChange={(e) => set({ whatsapp: e.target.value })} className={inputCls} />
+            </div>
+            <div className="space-y-1">
+              <label className={labelCls}>E-mail</label>
+              <input type="email" value={form.email} onChange={(e) => set({ email: e.target.value })} className={inputCls} />
             </div>
           </div>
 
-          <div className="space-y-1">
-            <label className="font-semibold text-slate-700 dark:text-slate-300">
-              URL do Logo da Empresa
-            </label>
-            <input
-              type="text"
-              placeholder="https://..."
-              value={logoUrl}
-              onChange={(e) => setLogoUrl(e.target.value)}
-              className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-            />
+          <AddressFields value={address} onChange={(p) => set(p as any)} />
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <label className={labelCls}>Site / Instagram</label>
+              <input type="text" value={form.website} onChange={(e) => set({ website: e.target.value })} className={inputCls} />
+            </div>
+            <div className="space-y-1">
+              <label className={labelCls}>Mensagem no rodapé dos recibos</label>
+              <input type="text" placeholder="Ex.: Obrigado pela preferência!" value={form.receiptNotes} onChange={(e) => set({ receiptNotes: e.target.value })} className={inputCls} />
+            </div>
           </div>
 
-          <div className="space-y-1">
-            <label className="font-semibold text-slate-700 dark:text-slate-300">
-              Texto Padrão de Rodapé dos Recibos
-            </label>
-            <input
-              type="text"
-              value={receiptNotes}
-              onChange={(e) => setReceiptNotes(e.target.value)}
-              className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-            />
-          </div>
-
-          <div className="pt-3 border-t border-slate-200 dark:border-slate-700 flex justify-end">
-            <button
-              type="submit"
-              className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold flex items-center gap-2 shadow-md shadow-blue-600/20"
-            >
-              <Save className="w-4 h-4" />
-              Salvar Alterações
+          <div className="pt-3 border-t border-slate-200 dark:border-slate-700 flex items-center justify-end gap-3">
+            {dirty && <span className="text-amber-600 text-[11px] font-semibold">Alterações não salvas</span>}
+            <button type="submit" className={`${btnPrimary} flex items-center gap-2`}>
+              <Save className="w-4 h-4" /> Salvar
             </button>
           </div>
         </form>
       )}
 
-      {/* TAB 2: GESTÃO DE USUÁRIOS */}
-      {activeTab === 'users' && (
-        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 shadow-xs space-y-4 text-xs">
-          <div className="flex items-center justify-between">
+      {/* FUNIL */}
+      {activeTab === 'funnel' && (
+        <div className={`${cardCls} p-6 space-y-4 text-xs`}>
+          <div className="flex items-center justify-between gap-3">
             <div>
-              <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                Usuários & Perfis de Acesso
-              </h3>
-              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                Administradores possuem controle total; Funcionários não acessam Configurações nem excluem registros.
-              </p>
+              <h3 className="text-base font-bold text-slate-900 dark:text-white">Etapas do funil de vendas</h3>
+              <p className="text-xs text-slate-500 mt-0.5">Renomeie, mude a cor, a ordem ou crie etapas. "Ganho" e "Perdido" são fixas.</p>
             </div>
-
-            <button
-              onClick={() => setIsNewUserModalOpen(true)}
-              className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold flex items-center gap-2"
-            >
-              <UserPlus className="w-4 h-4" />
-              Adicionar Usuário
+            <button onClick={addStage} className={`${btnSecondary} text-xs flex items-center gap-1.5`}>
+              <Plus className="w-3.5 h-3.5" /> Nova etapa
             </button>
           </div>
+          <div className="space-y-2">
+            {[...middleStages, ...fixedStages].map((s, i) => {
+              const fixed = s.isWon || s.isLost;
+              return (
+                <div key={s.id} className="flex items-center gap-2 p-2 rounded-xl border border-slate-200 dark:border-slate-700">
+                  <input type="color" value={s.color} onChange={(e) => updateStage(s.id, { color: e.target.value })} className="w-8 h-8 rounded cursor-pointer border-0 bg-transparent" />
+                  <input type="text" value={s.title} onChange={(e) => updateStage(s.id, { title: e.target.value })} className={`${inputCls} flex-1`} />
+                  {fixed ? (
+                    <Badge variant={s.isWon ? 'success' : 'danger'}>{s.isWon ? 'Ganho' : 'Perdido'}</Badge>
+                  ) : (
+                    <>
+                      <button onClick={() => moveStage(s.id, -1)} disabled={i === 0} className={btnIcon} title="Subir">
+                        <ArrowUp className="w-3.5 h-3.5" />
+                      </button>
+                      <button onClick={() => moveStage(s.id, 1)} disabled={i === middleStages.length - 1} className={btnIcon} title="Descer">
+                        <ArrowDown className="w-3.5 h-3.5" />
+                      </button>
+                      <button onClick={() => removeStage(s.id)} disabled={middleStages.length <= 1} className={`${btnIcon} hover:text-rose-600`} title="Remover">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          <p className="text-[11px] text-slate-400 flex items-center gap-1">
+            <Info className="w-3 h-3" /> Negócios que estiverem numa etapa removida continuam salvos; mova-os para outra etapa antes de remover.
+          </p>
+          <div className="flex justify-end">
+            <button onClick={saveStages} className={`${btnPrimary} flex items-center gap-2`}>
+              <Save className="w-4 h-4" /> Salvar etapas
+            </button>
+          </div>
+        </div>
+      )}
 
-          <div className="border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
+      {/* USUÁRIOS */}
+      {activeTab === 'users' && (
+        <div className={`${cardCls} p-6 space-y-4 text-xs`}>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-base font-bold text-slate-900 dark:text-white">Usuários e acessos</h3>
+              <p className="text-xs text-slate-500 mt-0.5">Administrador: acesso total. Funcionário: não vê Configurações e não exclui registros.</p>
+            </div>
+            <button onClick={() => setIsNewUserModalOpen(true)} className={`${btnPrimary} flex items-center gap-2`}>
+              <UserPlus className="w-4 h-4" /> Adicionar usuário
+            </button>
+          </div>
+          {!isConfigured && (
+            <p className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 text-amber-800 dark:text-amber-300">
+              Modo de teste: os usuários só passam a fazer login de verdade depois de conectar o Firebase.
+            </p>
+          )}
+          <div className="border border-slate-200 dark:border-slate-800 rounded-xl overflow-x-auto">
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="bg-slate-50 dark:bg-slate-800/60 font-bold border-b border-slate-200 dark:border-slate-800 text-slate-500">
@@ -466,37 +469,30 @@ export function SettingsView({ company, users }: SettingsViewProps) {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                {users.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="py-6 text-center text-slate-400">Nenhum usuário cadastrado ainda.</td>
+                  </tr>
+                )}
                 {users.map((u) => (
-                  <tr key={u.uid} className="hover:bg-slate-50/60 dark:hover:bg-slate-800/40">
+                  <tr key={u.uid || (u as any).id}>
                     <td className="py-3 px-4 font-semibold text-slate-800 dark:text-slate-200">
-                      {u.name}
+                      {u.name} {u.uid === profile?.uid && <span className="text-[10px] text-blue-600">(você)</span>}
                     </td>
                     <td className="py-3 px-4 text-slate-500">{u.email}</td>
                     <td className="py-3 px-4">
-                      <button
-                        onClick={() => handleToggleUserRole(u)}
-                        title="Clique para alternar o perfil"
-                        className="cursor-pointer"
-                      >
-                        <Badge variant={u.role === 'admin' ? 'purple' : 'info'}>
-                          {u.role === 'admin' ? 'Administrador' : 'Funcionário'}
-                        </Badge>
+                      <button onClick={() => toggleRole(u)} title="Clique para trocar o perfil">
+                        <Badge variant={u.role === 'admin' ? 'purple' : 'info'}>{u.role === 'admin' ? 'Administrador' : 'Funcionário'}</Badge>
                       </button>
                     </td>
                     <td className="py-3 px-4">
-                      <Badge variant={u.active ? 'success' : 'danger'}>
-                        {u.active ? 'Ativo' : 'Desativado'}
-                      </Badge>
+                      <Badge variant={u.active ? 'success' : 'danger'}>{u.active ? 'Ativo' : 'Desativado'}</Badge>
                     </td>
                     <td className="py-3 px-4 text-center">
                       <button
-                        onClick={() => handleToggleUserStatus(u)}
-                        title={u.active ? 'Desativar acesso do usuário' : 'Reativar usuário'}
-                        className={`p-1.5 rounded-lg transition-colors ${
-                          u.active
-                            ? 'text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/40'
-                            : 'text-emerald-600 hover:bg-emerald-50 dark:hover:bg-emerald-950/40'
-                        }`}
+                        onClick={() => toggleStatus(u)}
+                        title={u.active ? 'Desativar acesso' : 'Reativar'}
+                        className={`p-1.5 rounded-lg ${u.active ? 'text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/40' : 'text-emerald-600 hover:bg-emerald-50'}`}
                       >
                         <Power className="w-4 h-4" />
                       </button>
@@ -509,205 +505,107 @@ export function SettingsView({ company, users }: SettingsViewProps) {
         </div>
       )}
 
-      {/* TAB 3: BACKUP & RESTAURAÇÃO */}
+      {/* BACKUP */}
       {activeTab === 'backup' && (
-        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 shadow-xs space-y-6 text-xs">
+        <div className={`${cardCls} p-6 space-y-5 text-xs`}>
           <div>
-            <h3 className="text-base font-bold text-slate-900 dark:text-white">
-              Backup e Restauração de Dados
-            </h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-              Exporte todos os cadastros e transações em JSON ou importe um backup anterior
-            </p>
+            <h3 className="text-base font-bold text-slate-900 dark:text-white">Backup e restauração</h3>
+            <p className="text-xs text-slate-500 mt-0.5">Baixe uma cópia de tudo (clientes, financeiro, funil, produtos...) — recomendo fazer uma vez por semana.</p>
           </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {/* Export */}
-            <div className="p-5 rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/40 space-y-3">
-              <div className="flex items-center gap-2 text-slate-900 dark:text-white font-bold">
-                <Download className="w-5 h-5 text-blue-600" />
-                <span>Exportar Dados (Backup Completo)</span>
-              </div>
-              <p className="text-slate-500 leading-relaxed">
-                Gera um arquivo JSON contendo todas as coleções do Firestore: clientes, fornecedores, lançamentos financeiros, produtos, orçamentos, negócios e tarefas.
-              </p>
-              <button
-                onClick={handleExportBackup}
-                className="w-full py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold flex items-center justify-center gap-2 shadow-sm"
-              >
-                <Download className="w-4 h-4" />
-                Baixar Arquivo JSON de Backup
+          <div className="grid sm:grid-cols-2 gap-4">
+            <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-700 space-y-2">
+              <p className="font-bold text-slate-800 dark:text-slate-200">Baixar backup</p>
+              <p className="text-slate-500">Gera um arquivo .json com todos os dados.</p>
+              <button onClick={handleExportBackup} className={`${btnPrimary} flex items-center gap-2`}>
+                <Download className="w-4 h-4" /> Baixar backup
               </button>
             </div>
-
-            {/* Import */}
-            <form onSubmit={handleImportBackup} className="p-5 rounded-2xl border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/40 space-y-3">
-              <div className="flex items-center gap-2 text-slate-900 dark:text-white font-bold">
-                <Upload className="w-5 h-5 text-emerald-600" />
-                <span>Restaurar Backup (JSON)</span>
-              </div>
-              <p className="text-slate-500 leading-relaxed">
-                Cole o conteúdo do arquivo JSON de backup para importar os dados de volta para o Firestore:
-              </p>
-              <textarea
-                rows={3}
-                placeholder="Cole o código JSON do backup aqui..."
-                value={importJsonText}
-                onChange={(e) => setImportJsonText(e.target.value)}
-                className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 font-mono text-[11px]"
-              />
-              <button
-                type="submit"
-                disabled={isImporting || !importJsonText.trim()}
-                className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-semibold flex items-center justify-center gap-2"
-              >
-                <Upload className="w-4 h-4" />
-                {isImporting ? 'Processando Restauração...' : 'Restaurar Dados'}
+            <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-700 space-y-2">
+              <p className="font-bold text-slate-800 dark:text-slate-200">Restaurar backup</p>
+              <p className="text-slate-500">Os registros do arquivo são gravados por cima dos atuais com o mesmo código. Nada é apagado.</p>
+              <input ref={backupInput} type="file" accept="application/json,.json" className="hidden" onChange={(e) => handleBackupFile(e.target.files?.[0])} />
+              <button onClick={() => backupInput.current?.click()} disabled={isImporting} className={`${btnSecondary} flex items-center gap-2`}>
+                <Upload className="w-4 h-4" /> {isImporting ? 'Restaurando...' : 'Escolher arquivo'}
               </button>
-            </form>
+            </div>
           </div>
         </div>
       )}
 
-      {/* TAB 4: DADOS DE DEMONSTRAÇÃO */}
+      {/* DEMONSTRAÇÃO */}
       {activeTab === 'demo' && (
-        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 shadow-xs space-y-4 text-xs">
+        <div className={`${cardCls} p-6 space-y-4 text-xs`}>
           <div>
-            <h3 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
-              <Sparkles className="w-5 h-5 text-amber-500" />
-              Ambiente de Demonstração & Testes
-            </h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-              Crie rapidamente dados realistas de exemplo ou limpe o banco de dados
-            </p>
+            <h3 className="text-base font-bold text-slate-900 dark:text-white">Dados de demonstração</h3>
+            <p className="text-xs text-slate-500 mt-0.5">Útil para conhecer o sistema: cria clientes, fornecedores, produtos, negócios no funil, 6 meses de financeiro e tarefas.</p>
           </div>
-
-          <div className="p-4 rounded-xl bg-amber-50/60 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-amber-900 dark:text-amber-200 space-y-1">
-            <p className="font-bold">O que o botão "Carregar dados de demonstração" faz?</p>
-            <ul className="list-disc pl-4 space-y-0.5 text-[11px] text-amber-800 dark:text-amber-300">
-              <li>Popula dados da empresa ("Gestor Pro Soluções Ltda" na Av. Paulista)</li>
-              <li>Cadastra 3 contas bancárias (Itaú, Banco do Brasil, Caixa pequeno) com saldos</li>
-              <li>Cadastra 13 categorias de receitas e despesas com cores</li>
-              <li>Cadastra 5 clientes (TechCorp, Restaurante Sabor, etc.) e 3 fornecedores (Dell, Enel, etc.)</li>
-              <li>Gera 6 meses de lançamentos financeiros históricos (pagos, pendentes e vencidos)</li>
-              <li>Alimenta o funil CRM Kanban com oportunidades em todas as etapas</li>
-              <li>Cadastra catálogo de produtos e serviços com estoque crítico de teste</li>
-            </ul>
-          </div>
-
-          <div className="flex items-center gap-3 pt-2">
-            <button
-              onClick={handleLoadDemo}
-              disabled={isLoadingDemo}
-              className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-bold flex items-center gap-2 shadow-md shadow-blue-600/20 disabled:opacity-50"
-            >
-              <Sparkles className="w-4 h-4 text-amber-300" />
-              {isLoadingDemo ? 'Carregando dados...' : 'Carregar Dados de Demonstração'}
+          <p className="p-3 rounded-xl bg-blue-50 dark:bg-blue-950/30 text-blue-800 dark:text-blue-300">
+            Os registros de demonstração ficam marcados. O botão "Apagar demonstração" remove <strong>somente</strong> eles — seus dados reais não são tocados.
+          </p>
+          <div className="flex flex-wrap gap-3">
+            <button onClick={handleLoadDemo} disabled={isLoadingDemo} className={`${btnPrimary} flex items-center gap-2`}>
+              <Sparkles className="w-4 h-4" /> {isLoadingDemo ? 'Carregando...' : 'Carregar demonstração'}
             </button>
-
-            <button
-              onClick={() => setConfirmClearDemo(true)}
-              className="px-4 py-2.5 rounded-xl border border-rose-300 dark:border-rose-800 text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 font-semibold flex items-center gap-2"
-            >
-              <Trash2 className="w-4 h-4" />
-              Apagar Dados de Demonstração
+            <button onClick={() => setConfirmClearDemo(true)} className="px-4 py-2 rounded-xl border border-rose-200 text-rose-600 hover:bg-rose-50 dark:border-rose-900 dark:hover:bg-rose-950/40 font-semibold flex items-center gap-2">
+              <Trash2 className="w-4 h-4" /> Apagar demonstração
             </button>
           </div>
         </div>
       )}
 
-      {/* MODAL: NOVO USUÁRIO */}
-      <Modal
-        isOpen={isNewUserModalOpen}
-        onClose={() => setIsNewUserModalOpen(false)}
-        title="Cadastrar Novo Usuário"
-        subtitle="Crie o login e perfil de acesso"
-        maxWidth="md"
-      >
-        <form onSubmit={handleCreateUser} className="space-y-3.5 text-xs">
+      {/* Modal novo usuário */}
+      <Modal isOpen={isNewUserModalOpen} onClose={() => setIsNewUserModalOpen(false)} title="Novo usuário" subtitle="A pessoa entra com este e-mail e senha" maxWidth="md">
+        <form onSubmit={handleCreateUser} className="space-y-3 text-xs">
           <div className="space-y-1">
-            <label className="font-semibold text-slate-700 dark:text-slate-300">
-              Nome Completo *
-            </label>
-            <input
-              type="text"
-              required
-              placeholder="Ex: Carlos Eduardo"
-              value={newUserName}
-              onChange={(e) => setNewUserName(e.target.value)}
-              className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-            />
+            <label className={labelCls}>Nome *</label>
+            <input type="text" required value={newUserName} onChange={(e) => setNewUserName(e.target.value)} className={inputCls} />
           </div>
-
           <div className="space-y-1">
-            <label className="font-semibold text-slate-700 dark:text-slate-300">
-              E-mail de Acesso *
-            </label>
-            <input
-              type="email"
-              required
-              placeholder="carlos@gestorpro.com.br"
-              value={newUserEmail}
-              onChange={(e) => setNewUserEmail(e.target.value)}
-              className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-            />
+            <label className={labelCls}>E-mail *</label>
+            <input type="email" required value={newUserEmail} onChange={(e) => setNewUserEmail(e.target.value)} className={inputCls} />
           </div>
-
-          <div className="space-y-1">
-            <label className="font-semibold text-slate-700 dark:text-slate-300">
-              Senha Provisória (Mínimo 6 dígitos) *
-            </label>
-            <input
-              type="password"
-              required
-              placeholder="••••••••"
-              value={newUserPass}
-              onChange={(e) => setNewUserPass(e.target.value)}
-              className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-            />
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <label className={labelCls}>Senha inicial *</label>
+              <input type="text" required minLength={6} value={newUserPass} onChange={(e) => setNewUserPass(e.target.value)} className={`${inputCls} font-mono`} />
+            </div>
+            <div className="space-y-1">
+              <label className={labelCls}>Perfil</label>
+              <select value={newUserRole} onChange={(e) => setNewUserRole(e.target.value as UserRole)} className={inputCls}>
+                <option value="employee">Funcionário</option>
+                <option value="admin">Administrador</option>
+              </select>
+            </div>
           </div>
-
-          <div className="space-y-1">
-            <label className="font-semibold text-slate-700 dark:text-slate-300">
-              Perfil de Acesso *
-            </label>
-            <select
-              value={newUserRole}
-              onChange={(e) => setNewUserRole(e.target.value as any)}
-              className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-            >
-              <option value="employee">Funcionário Operacional</option>
-              <option value="admin">Administrador Geral</option>
-            </select>
-          </div>
-
-          <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-200 dark:border-slate-700">
-            <button
-              type="button"
-              onClick={() => setIsNewUserModalOpen(false)}
-              className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-100"
-            >
+          <p className="text-[11px] text-slate-400">Depois a pessoa pode trocar a senha pelo "Esqueci minha senha" na tela de login.</p>
+          <div className="flex justify-end gap-2 pt-3 border-t border-slate-200 dark:border-slate-700">
+            <button type="button" onClick={() => setIsNewUserModalOpen(false)} className={btnSecondary}>
               Cancelar
             </button>
-            <button
-              type="submit"
-              disabled={isCreatingUser}
-              className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-semibold"
-            >
-              {isCreatingUser ? 'Criando...' : 'Criar Usuário'}
+            <button type="submit" disabled={isCreatingUser} className={btnPrimary}>
+              {isCreatingUser ? 'Criando...' : 'Criar usuário'}
             </button>
           </div>
         </form>
       </Modal>
 
-      {/* CONFIRMAÇÃO DE APAGAR DADOS DE DEMO */}
+      <ConfirmDialog
+        isOpen={Boolean(pendingImport)}
+        onClose={() => setPendingImport(null)}
+        onConfirm={confirmImport}
+        loading={isImporting}
+        variant="warning"
+        confirmText="Restaurar"
+        title="Restaurar backup"
+        message={`Restaurar o arquivo "${pendingImport?.name}"? Registros com o mesmo código serão substituídos pela versão do backup.`}
+      />
       <ConfirmDialog
         isOpen={confirmClearDemo}
         onClose={() => setConfirmClearDemo(false)}
         onConfirm={handleClearDemo}
-        title="Apagar Dados de Demonstração"
-        message="Tem certeza de que deseja apagar todos os clientes, produtos, negócios e lançamentos cadastrados? Os dados da empresa serão preservados."
-        loading={isClearingDemo}
+        confirmText="Apagar"
+        title="Apagar dados de demonstração"
+        message="Remove somente os registros de demonstração. Seus dados reais continuam."
       />
     </div>
   );

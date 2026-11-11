@@ -47,7 +47,7 @@ export function StatCard({
           <p className="text-xs font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400 truncate">
             {title}
           </p>
-          <h3 className="text-2xl font-bold tracking-tight text-slate-900 dark:text-white mt-1.5 font-mono">
+          <h3 className="text-lg xl:text-xl font-bold tracking-tight text-slate-900 dark:text-white mt-1.5 font-mono whitespace-nowrap truncate" title={value}>
             {value}
           </h3>
           {subtitle && (

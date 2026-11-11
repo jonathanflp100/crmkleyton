@@ -17,7 +17,7 @@ import {
   List,
   CalendarDays,
 } from 'lucide-react';
-import type { Task, Client, Deal } from '../../../types';
+import type { Task, Client, Deal, UserProfile } from '../../../types';
 import { formatDate } from '../../../utils/formatters';
 import { Badge } from '../../common/Badge';
 import { Modal } from '../../common/Modal';
@@ -44,6 +44,7 @@ interface TasksViewProps {
   tasks: Task[];
   clients: Client[];
   deals: Deal[];
+  users: UserProfile[];
   openCreateTask?: boolean;
   onClearQuickAction?: () => void;
 }
@@ -52,6 +53,7 @@ export function TasksView({
   tasks,
   clients,
   deals,
+  users,
   openCreateTask = false,
   onClearQuickAction,
 }: TasksViewProps) {
@@ -65,7 +67,10 @@ export function TasksView({
   const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'completed'>('pending');
 
   // Modal
-  const [isModalOpen, setIsModalOpen] = useState(openCreateTask);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  React.useEffect(() => {
+    if (openCreateTask) openNewModal();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [editingTask, setEditingTask] = useState<Task | null>(null);
 
   // Form
@@ -502,6 +507,11 @@ export function TasksView({
                 onChange={(e) => setFormDueDate(e.target.value)}
                 className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
               />
+              <datalist id="task-assignees">
+                {Array.from(new Set([...users.filter((u) => u.active !== false).map((u) => u.name), ...tasks.map((t) => t.assignedToUserName || '')].filter(Boolean))).map((n) => (
+                  <option key={n} value={n} />
+                ))}
+              </datalist>
             </div>
 
             <div className="space-y-1">
@@ -541,6 +551,7 @@ export function TasksView({
                 type="text"
                 placeholder="Nome do responsável"
                 value={formAssignee}
+                list="task-assignees"
                 onChange={(e) => setFormAssignee(e.target.value)}
                 className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
               />

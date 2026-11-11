@@ -15,6 +15,7 @@ import {
   AlertCircle,
   Sparkles,
   ShoppingBag,
+  Edit2,
 } from 'lucide-react';
 import type {
   Proposal,
@@ -25,15 +26,17 @@ import type {
   Account,
   CompanyProfile,
   Transaction,
+  Category,
 } from '../../../types';
-import { formatCurrency, formatDate } from '../../../utils/formatters';
+import { formatCurrency, formatDate, formatMoneyInput, parseMoney, whatsappLink, PAYMENT_METHODS, formatAddress } from '../../../utils/formatters';
+import { MoneyInput } from '../../common/MoneyInput';
+import { printProposal } from '../../../services/printDocuments';
 import { Badge } from '../../common/Badge';
 import { Modal } from '../../common/Modal';
 import { ConfirmDialog } from '../../common/ConfirmDialog';
 import { EmptyState } from '../../common/EmptyState';
 import { Pagination } from '../../common/Pagination';
 import { FirestoreService } from '../../../services/firestoreService';
-import { ExportService } from '../../../services/exportService';
 import { useAuth } from '../../../hooks/useAuth';
 import { useToast } from '../../../hooks/useToast';
 import { addDays, format } from 'date-fns';
@@ -43,6 +46,7 @@ interface ProposalsViewProps {
   clients: Client[];
   products: Product[];
   accounts: Account[];
+  categories: Category[];
   company?: CompanyProfile | null;
   openCreateProposal?: boolean;
   onClearQuickAction?: () => void;
@@ -53,6 +57,7 @@ export function ProposalsView({
   clients,
   products,
   accounts,
+  categories,
   company,
   openCreateProposal = false,
   onClearQuickAction,
@@ -66,12 +71,17 @@ export function ProposalsView({
   const itemsPerPage = 8;
 
   // Modals
-  const [isModalOpen, setIsModalOpen] = useState(openCreateProposal);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  React.useEffect(() => {
+    if (openCreateProposal) openNewModal();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [editingProposal, setEditingProposal] = useState<Proposal | null>(null);
 
   // Convert to sale modal
   const [convertingProposal, setConvertingProposal] = useState<Proposal | null>(null);
-  const [salePaymentMethod, setSalePaymentMethod] = useState<Transaction['paymentMethod']>('pix');
+  const [salePaymentMethod, setSalePaymentMethod] = useState<Transaction['paymentMethod']>('bank_transfer');
+  const [saleReceivedNow, setSaleReceivedNow] = useState(false);
+  const [isConverting, setIsConverting] = useState(false);
   const [saleAccountId, setSaleAccountId] = useState(accounts[0]?.id || '');
   const [saleInstallments, setSaleInstallments] = useState<number>(1);
   const [saleFirstDue, setSaleFirstDue] = useState(format(new Date(), 'yyyy-MM-dd'));
@@ -79,7 +89,7 @@ export function ProposalsView({
   // Form Fields
   const [formClientId, setFormClientId] = useState('');
   const [formValidUntil, setFormValidUntil] = useState(format(addDays(new Date(), 15), 'yyyy-MM-dd'));
-  const [formPaymentConditions, setFormPaymentConditions] = useState('À vista via Pix com 5% ou em até 3x no boleto');
+  const [formPaymentConditions, setFormPaymentConditions] = useState('À vista ou em até 3x');
   const [formDiscount, setFormDiscount] = useState<string>('0');
   const [formShipping, setFormShipping] = useState<string>('0');
   const [formNotes, setFormNotes] = useState('');
@@ -105,18 +115,16 @@ export function ProposalsView({
   }, [items]);
 
   const totalCalculated = useMemo(() => {
-    const disc = parseFloat(formDiscount.replace(',', '.')) || 0;
-    const ship = parseFloat(formShipping.replace(',', '.')) || 0;
-    return Math.max(0, subtotal - disc + ship);
+    return Math.max(0, subtotal - parseMoney(formDiscount) + parseMoney(formShipping));
   }, [subtotal, formDiscount, formShipping]);
 
   const openNewModal = () => {
     setEditingProposal(null);
     setFormClientId(clients[0]?.id || '');
     setFormValidUntil(format(addDays(new Date(), 15), 'yyyy-MM-dd'));
-    setFormPaymentConditions('À vista via Pix com 5% de desconto ou em até 3x sem juros');
-    setFormDiscount('0');
-    setFormShipping('0');
+    setFormPaymentConditions('À vista ou em até 3x');
+    setFormDiscount('');
+    setFormShipping('');
     setFormNotes('');
     setFormStatus('draft');
     setItems([
@@ -132,31 +140,35 @@ export function ProposalsView({
     setIsModalOpen(true);
   };
 
+  const openEditModal = (p: Proposal) => {
+    setEditingProposal(p);
+    setFormClientId(p.clientId);
+    setFormValidUntil(p.validUntil || format(addDays(new Date(), 15), 'yyyy-MM-dd'));
+    setFormPaymentConditions(p.paymentConditions || '');
+    setFormDiscount(formatMoneyInput(p.discount));
+    setFormShipping(formatMoneyInput(p.shipping));
+    setFormNotes(p.notes || '');
+    setFormStatus(p.status);
+    setItems(p.items?.length ? p.items.map((i) => ({ ...i })) : []);
+    setIsModalOpen(true);
+  };
+
+  const recalc = (it: ProposalItem): ProposalItem => ({
+    ...it,
+    totalPrice: Math.max(0, Math.round(it.quantity * it.unitPrice - (it.discount || 0))),
+  });
+
   const handleItemProductChange = (index: number, productId: string) => {
     const prod = products.find((p) => p.id === productId);
-    const updated = [...items];
-    updated[index].productId = productId;
-    updated[index].productName = prod?.name || '';
-    updated[index].unitPrice = prod?.salePrice || 0;
-    updated[index].totalPrice =
-      updated[index].quantity * (prod?.salePrice || 0) - (updated[index].discount || 0);
-    setItems(updated);
+    setItems(items.map((it, i) => (i === index ? recalc({ ...it, productId, productName: prod?.name || '', unitPrice: prod?.salePrice || 0, costPrice: prod?.costPrice }) : it)));
   };
 
   const handleItemQuantityChange = (index: number, qty: number) => {
-    const updated = [...items];
-    updated[index].quantity = Math.max(1, qty);
-    updated[index].totalPrice =
-      updated[index].quantity * updated[index].unitPrice - (updated[index].discount || 0);
-    setItems(updated);
+    setItems(items.map((it, i) => (i === index ? recalc({ ...it, quantity: Math.max(1, qty || 1) }) : it)));
   };
 
   const handleItemPriceChange = (index: number, price: number) => {
-    const updated = [...items];
-    updated[index].unitPrice = Math.max(0, price);
-    updated[index].totalPrice =
-      updated[index].quantity * updated[index].unitPrice - (updated[index].discount || 0);
-    setItems(updated);
+    setItems(items.map((it, i) => (i === index ? recalc({ ...it, unitPrice: Math.max(0, price || 0) }) : it)));
   };
 
   const handleAddItem = () => {
@@ -174,7 +186,6 @@ export function ProposalsView({
   };
 
   const handleRemoveItem = (index: number) => {
-    if (items.length <= 1) return;
     setItems(items.filter((_, i) => i !== index));
   };
 
@@ -186,9 +197,14 @@ export function ProposalsView({
       return;
     }
 
-    const disc = parseFloat(formDiscount.replace(',', '.')) || 0;
-    const ship = parseFloat(formShipping.replace(',', '.')) || 0;
-    const nextNumber = `${new Date().getFullYear()}${(proposals.length + 1).toString().padStart(4, '0')}`;
+    const validItems = items.filter((i) => i.productId || i.productName);
+    if (!validItems.length) {
+      error('Adicione pelo menos um item ao orçamento.');
+      return;
+    }
+    const disc = parseMoney(formDiscount);
+    const ship = parseMoney(formShipping);
+    const nextNumber = await FirestoreService.nextProposalNumber(proposals);
 
     try {
       if (editingProposal) {
@@ -203,8 +219,9 @@ export function ProposalsView({
             clientEmail: client.email,
             validUntil: formValidUntil,
             status: formStatus,
-            items,
+            items: validItems,
             subtotal,
+            clientAddress: formatAddress(client),
             discount: disc,
             shipping: ship,
             total: totalCalculated,
@@ -227,8 +244,9 @@ export function ProposalsView({
             date: format(new Date(), 'yyyy-MM-dd'),
             validUntil: formValidUntil,
             status: formStatus,
-            items,
+            items: validItems,
             subtotal,
+            clientAddress: formatAddress(client),
             discount: disc,
             shipping: ship,
             total: totalCalculated,
@@ -250,37 +268,46 @@ export function ProposalsView({
 
   // Convert to sale logic: Aprovado vira Venda -> Baixa estoque e gera conta a receber
   const handleExecuteConvertToSale = async () => {
-    if (!convertingProposal) return;
+    if (!convertingProposal || isConverting) return;
+    setIsConverting(true);
     try {
+      const salesCat = categories.find((c) => c.id === 'cat_vendas') || categories.find((c) => c.type === 'income');
       await FirestoreService.convertProposalToSale(
         convertingProposal,
         salePaymentMethod,
         saleAccountId,
         saleInstallments,
         saleFirstDue,
-        profile ? { uid: profile.uid, name: profile.name } : undefined
+        profile ? { uid: profile.uid, name: profile.name } : undefined,
+        {
+          receivedNow: saleReceivedNow,
+          categoryId: salesCat?.id,
+          categoryName: salesCat?.name,
+          accountName: accounts.find((a) => a.id === saleAccountId)?.name,
+        }
       );
-      success('Orçamento transformado em Venda! Estoque baixado e contas a receber geradas.');
+      success(saleReceivedNow ? 'Venda concluída e recebimento lançado no Financeiro!' : 'Venda concluída! Estoque baixado e conta a receber gerada.');
       setConvertingProposal(null);
     } catch (err: any) {
-      error('Erro ao converter venda', err?.message);
+      error('Erro ao concluir a venda', err?.message);
+    } finally {
+      setIsConverting(false);
     }
   };
 
   // Send WhatsApp message
   const handleSendWhatsApp = (p: Proposal) => {
-    const phone = p.clientPhone?.replace(/\D/g, '');
-    if (!phone) {
-      error('Cliente não possui telefone/WhatsApp cadastrado.');
+    const client = clients.find((c) => c.id === p.clientId);
+    const itemsText = p.items.map((i) => `• ${i.quantity}x ${i.productName} — ${formatCurrency(i.totalPrice)}`).join('\n');
+    const link = whatsappLink(
+      client?.whatsapp || client?.phone || p.clientPhone,
+      `Olá ${p.clientName}! Segue o orçamento Nº ${p.number}:\n\n${itemsText}\n\n*Total: ${formatCurrency(p.total)}*\nVálido até ${formatDate(p.validUntil)}.\n${p.paymentConditions ? `Pagamento: ${p.paymentConditions}\n` : ''}\nQualquer dúvida estamos à disposição!`
+    );
+    if (!link) {
+      error('O cliente não tem telefone/WhatsApp cadastrado.');
       return;
     }
-    const cleanPhone = phone.startsWith('55') ? phone : `55${phone}`;
-    const text = encodeURIComponent(
-      `Olá ${p.clientName}! Segue o link com o Orçamento #${p.number} no valor de ${formatCurrency(
-        p.total
-      )}. Válido até ${formatDate(p.validUntil)}. Ficamos à disposição!`
-    );
-    window.open(`https://wa.me/${cleanPhone}?text=${text}`, '_blank');
+    window.open(link, '_blank');
   };
 
   const filteredProposals = useMemo(() => {
@@ -410,8 +437,11 @@ export function ProposalsView({
                   <button
                     onClick={() => {
                       setConvertingProposal(p);
-                      setSalePaymentMethod('pix');
-                      setSaleAccountId(accounts[0]?.id || '');
+                      setSalePaymentMethod('bank_transfer');
+                      setSaleAccountId(accounts.find((a) => a.isDefault)?.id || accounts[0]?.id || '');
+                      setSaleInstallments(1);
+                      setSaleReceivedNow(false);
+                      setSaleFirstDue(format(new Date(), 'yyyy-MM-dd'));
                     }}
                     className="font-bold text-emerald-600 hover:text-emerald-700 flex items-center gap-1"
                   >
@@ -440,13 +470,22 @@ export function ProposalsView({
 
                   {/* Gerar PDF */}
                   <button
-                    onClick={() => ExportService.generateProposalPDF(p, company)}
-                    title="Baixar PDF com logo e dados da empresa"
+                    onClick={() => printProposal(p, company, clients.find((c) => c.id === p.clientId))}
+                    title="Imprimir / salvar PDF"
                     className="p-1.5 rounded-lg text-slate-500 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-slate-800"
                   >
                     <Printer className="w-4 h-4" />
                   </button>
 
+                  {p.status !== 'approved' && (
+                    <button
+                      onClick={() => openEditModal(p)}
+                      title="Editar orçamento"
+                      className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800"
+                    >
+                      <Edit2 className="w-4 h-4" />
+                    </button>
+                  )}
                   {isAdmin && (
                     <button
                       onClick={() => setDeletingId(p.id)}
@@ -569,12 +608,11 @@ export function ProposalsView({
                   </div>
 
                   <div className="col-span-2">
-                    <input
-                      type="number"
-                      step="0.01"
-                      placeholder="Preço Unit."
-                      value={item.unitPrice}
-                      onChange={(e) => handleItemPriceChange(index, parseFloat(e.target.value))}
+                    <MoneyInput
+                      showSymbol={false}
+                      placeholder="Preço"
+                      value={formatMoneyInput(item.unitPrice)}
+                      onChange={(v) => handleItemPriceChange(index, parseMoney(v))}
                       className="w-full px-2 py-1.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-right font-mono"
                     />
                   </div>
@@ -603,23 +641,25 @@ export function ProposalsView({
               </div>
 
               <div className="flex items-center justify-end gap-3">
-                <span className="text-slate-500">Desconto (R$):</span>
-                <input
-                  type="text"
-                  value={formDiscount}
-                  onChange={(e) => setFormDiscount(e.target.value)}
-                  className="w-24 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 font-mono text-right"
-                />
+                <span className="text-slate-500">Desconto:</span>
+                <div className="w-40">
+                  <MoneyInput
+                    value={formDiscount}
+                    onChange={setFormDiscount}
+                    className="w-full px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 font-mono text-right"
+                  />
+                </div>
               </div>
 
               <div className="flex items-center justify-end gap-3">
-                <span className="text-slate-500">Frete / Entrega (R$):</span>
-                <input
-                  type="text"
-                  value={formShipping}
-                  onChange={(e) => setFormShipping(e.target.value)}
-                  className="w-24 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 font-mono text-right"
-                />
+                <span className="text-slate-500">Frete / entrega:</span>
+                <div className="w-40">
+                  <MoneyInput
+                    value={formShipping}
+                    onChange={setFormShipping}
+                    className="w-full px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 font-mono text-right"
+                  />
+                </div>
               </div>
 
               <div className="pt-2 text-sm font-bold text-slate-900 dark:text-white flex items-center justify-end gap-3">
@@ -698,11 +738,11 @@ export function ProposalsView({
               onChange={(e) => setSalePaymentMethod(e.target.value as any)}
               className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
             >
-              <option value="pix">Pix (à vista)</option>
-              <option value="bank_slip">Boleto Bancário</option>
-              <option value="credit_card">Cartão de Crédito</option>
-              <option value="bank_transfer">Transferência Bancária</option>
-              <option value="cash">Dinheiro em Espécie</option>
+              {PAYMENT_METHODS.map((pm) => (
+                <option key={pm.value} value={pm.value}>
+                  {pm.label}
+                </option>
+              ))}
             </select>
           </div>
 
@@ -745,7 +785,7 @@ export function ProposalsView({
 
             <div className="space-y-1">
               <label className="font-semibold text-slate-700 dark:text-slate-300">
-                Data do 1º Vencimento
+                1º vencimento
               </label>
               <input
                 type="date"
@@ -756,6 +796,13 @@ export function ProposalsView({
             </div>
           </div>
 
+          {saleInstallments === 1 && (
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input type="checkbox" checked={saleReceivedNow} onChange={(e) => setSaleReceivedNow(e.target.checked)} />
+              <span className="font-semibold text-slate-700 dark:text-slate-300">O cliente já pagou (lançar como recebido)</span>
+            </label>
+          )}
+
           <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-200 dark:border-slate-700">
             <button
               onClick={() => setConvertingProposal(null)}
@@ -765,6 +812,7 @@ export function ProposalsView({
             </button>
             <button
               onClick={handleExecuteConvertToSale}
+              disabled={isConverting}
               className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold shadow-md shadow-emerald-600/20"
             >
               Confirmar e Concluir Venda

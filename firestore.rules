@@ -1,144 +1,82 @@
 rules_version = '2';
 
+// Gestor Pro — regras de segurança
+// - Só quem tem cadastro ATIVO em /users acessa os dados (criar conta no Firebase Auth não basta).
+// - Funcionário cria e edita; só admin exclui, mexe em usuários e nos dados da empresa.
+// - O primeiro admin é criado pela tela de "Primeiro acesso" (enquanto /system/setup não existir).
+
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Helper functions
-    function isSignedIn() {
+    function signedIn() {
       return request.auth != null;
     }
 
+    function userDoc() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
+    function isActiveUser() {
+      return signedIn() && exists(userDoc()) && get(userDoc()).data.active == true;
+    }
+
     function isAdmin() {
-      return isSignedIn() && (
-        request.auth.token.email == 'jonathanflp100@gmail.com' ||
-        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')
-      );
+      return isActiveUser() && get(userDoc()).data.role == 'admin';
     }
 
-    function isSelf(userId) {
-      return isSignedIn() && request.auth.uid == userId;
+    function setupDone() {
+      return exists(/databases/$(database)/documents/system/setup);
     }
 
-    // Default deny all access
+    // Tudo fechado por padrão
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // Users collection: only authenticated users can read.
-    // Self or admin can create initial profile.
-    // Only admins can delete or change roles; non-admins cannot elevate their own role.
-    match /users/{userId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn() && (isAdmin() || isSelf(userId));
-      allow update: if isSignedIn() && (
-        isAdmin() || 
-        (isSelf(userId) && (!('role' in request.resource.data) || request.resource.data.role == resource.data.role))
-      );
-      allow delete: if isAdmin();
-    }
-
-    // Company profile and global settings
-    match /company/{docId} {
-      allow read: if isSignedIn();
-      allow create, update: if isAdmin();
-      allow delete: if isAdmin();
-    }
-
-    // Clients
-    match /clients/{clientId} {
-      allow read: if isSignedIn();
-      allow create, update: if isSignedIn();
-      allow delete: if isAdmin();
-    }
-
-    // Suppliers
-    match /suppliers/{supplierId} {
-      allow read: if isSignedIn();
-      allow create, update: if isSignedIn();
-      allow delete: if isAdmin();
-    }
-
-    // Transactions (Financeiro)
-    match /transactions/{transactionId} {
-      allow read: if isSignedIn();
-      allow create, update: if isSignedIn();
-      allow delete: if isAdmin();
-    }
-
-    // Bank and Cash Accounts
-    match /accounts/{accountId} {
-      allow read: if isSignedIn();
-      allow create, update: if isSignedIn();
-      allow delete: if isAdmin();
-    }
-
-    // Financial Categories
-    match /categories/{categoryId} {
-      allow read: if isSignedIn();
-      allow create, update: if isSignedIn();
-      allow delete: if isAdmin();
-    }
-
-    // CRM Deals (Funil de Vendas)
-    match /deals/{dealId} {
-      allow read: if isSignedIn();
-      allow create, update: if isSignedIn();
-      allow delete: if isAdmin();
-    }
-
-    // Deal Interactions history
-    match /deal_interactions/{interactionId} {
-      allow read: if isSignedIn();
-      allow create, update: if isSignedIn();
-      allow delete: if isAdmin();
-    }
-
-    // Deal Tasks
-    match /deal_tasks/{taskId} {
-      allow read: if isSignedIn();
-      allow create, update: if isSignedIn();
-      allow delete: if isAdmin();
-    }
-
-    // Products & Services Catalog
-    match /products/{productId} {
-      allow read: if isSignedIn();
-      allow create, update: if isSignedIn();
-      allow delete: if isAdmin();
-    }
-
-    // Proposals / Quotes / Sales
-    match /proposals/{proposalId} {
-      allow read: if isSignedIn();
-      allow create, update: if isSignedIn();
-      allow delete: if isAdmin();
-    }
-
-    // General Tasks & Schedule
-    match /tasks/{taskId} {
-      allow read: if isSignedIn();
-      allow create, update: if isSignedIn();
-      allow delete: if isAdmin();
-    }
-
-    // Financial Transfers between accounts
-    match /transfers/{transferId} {
-      allow read: if isSignedIn();
-      allow create, update: if isSignedIn();
-      allow delete: if isAdmin();
-    }
-
-    // Audit logs
-    match /audit_logs/{logId} {
-      allow read: if isSignedIn();
-      allow create: if isSignedIn();
-      allow update, delete: if isAdmin();
-    }
-
-    // Test connection doc
-    match /test/{docId} {
+    // Indica se o sistema já tem administrador (lido antes do login)
+    match /system/setup {
       allow read: if true;
+      allow create: if signedIn() && !setupDone()
+        && getAfter(userDoc()).data.role == 'admin';
+      allow update, delete: if false;
+    }
+
+    match /users/{userId} {
+      allow read: if isActiveUser() || (signedIn() && request.auth.uid == userId);
+      // primeiro admin (cadastro inicial) ou admin cadastrando funcionários
+      allow create: if isAdmin()
+        || (signedIn() && request.auth.uid == userId && !setupDone()
+            && request.resource.data.role == 'admin');
+      // usuário pode editar o próprio nome/telefone, mas não o perfil nem o status
+      allow update: if isAdmin()
+        || (isActiveUser() && request.auth.uid == userId
+            && request.resource.data.role == resource.data.role
+            && request.resource.data.active == resource.data.active);
+      allow delete: if isAdmin();
+    }
+
+    match /company/{docId} {
+      allow read: if isActiveUser();
+      allow write: if isAdmin();
+    }
+
+    // Dados operacionais: funcionários criam e editam, só admin exclui
+    match /{col}/{docId} {
+      allow read, create, update: if isActiveUser() && col in [
+        'clients', 'suppliers', 'transactions', 'accounts', 'categories',
+        'deals', 'deal_interactions', 'products', 'proposals', 'tasks', 'transfers'
+      ];
+      allow delete: if isAdmin() && col in [
+        'clients', 'suppliers', 'transactions', 'accounts', 'categories',
+        'deals', 'deal_interactions', 'products', 'proposals', 'tasks', 'transfers'
+      ];
+    }
+
+    // Auditoria: todos registram, ninguém altera
+    match /audit_logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isActiveUser();
+      allow update, delete: if false;
     }
   }
 }

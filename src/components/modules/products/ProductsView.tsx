@@ -14,12 +14,13 @@ import {
   Boxes,
 } from 'lucide-react';
 import type { Product, ItemType } from '../../../types';
-import { formatCurrency } from '../../../utils/formatters';
+import { formatMoneyInput, parseMoney, formatCurrency } from '../../../utils/formatters';
 import { Badge } from '../../common/Badge';
 import { Modal } from '../../common/Modal';
 import { ConfirmDialog } from '../../common/ConfirmDialog';
 import { EmptyState } from '../../common/EmptyState';
 import { Pagination } from '../../common/Pagination';
+import { MoneyInput } from '../../common/MoneyInput';
 import { FirestoreService } from '../../../services/firestoreService';
 import { useAuth } from '../../../hooks/useAuth';
 import { useToast } from '../../../hooks/useToast';
@@ -57,8 +58,8 @@ export function ProductsView({ products }: ProductsViewProps) {
 
   // Automatic margin calculation
   const calculatedMargin = useMemo(() => {
-    const cost = parseFloat(formCostPrice.replace(',', '.')) || 0;
-    const sale = parseFloat(formSalePrice.replace(',', '.')) || 0;
+    const cost = parseMoney(formCostPrice);
+    const sale = parseMoney(formSalePrice);
     if (sale <= 0) return 0;
     const profit = sale - cost;
     return Math.round((profit / sale) * 100 * 10) / 10;
@@ -83,8 +84,8 @@ export function ProductsView({ products }: ProductsViewProps) {
     setFormType(p.type);
     setFormCode(p.code || '');
     setFormName(p.name);
-    setFormCostPrice(String(p.costPrice || ''));
-    setFormSalePrice(String(p.salePrice));
+    setFormCostPrice(formatMoneyInput(p.costPrice));
+    setFormSalePrice(formatMoneyInput(p.salePrice));
     setFormStock(String(p.stockQuantity ?? 0));
     setFormMinStock(String(p.minStockQuantity ?? 0));
     setFormUnit(p.unit || 'un');
@@ -94,12 +95,12 @@ export function ProductsView({ products }: ProductsViewProps) {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    const cost = parseFloat(formCostPrice.replace(',', '.')) || 0;
-    const sale = parseFloat(formSalePrice.replace(',', '.'));
+    const cost = parseMoney(formCostPrice);
+    const sale = parseMoney(formSalePrice);
     const stock = parseInt(formStock, 10) || 0;
     const minStock = parseInt(formMinStock, 10) || 0;
 
-    if (!formName.trim() || isNaN(sale) || sale <= 0) {
+    if (!formName.trim() || sale <= 0) {
       error('Preencha o nome do item e um preço de venda válido.');
       return;
     }
@@ -410,7 +411,7 @@ export function ProductsView({ products }: ProductsViewProps) {
               <input
                 type="text"
                 required
-                placeholder="Ex: Servidor Dell Xeon..."
+                placeholder="Ex.: Notebook 15 polegadas"
                 value={formName}
                 onChange={(e) => setFormName(e.target.value)}
                 className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
@@ -423,24 +424,20 @@ export function ProductsView({ products }: ProductsViewProps) {
             <span className="font-bold text-slate-700 dark:text-slate-300">Formação de Preço & Margem</span>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="space-y-1">
-                <label className="text-slate-500">Preço de Custo (R$)</label>
-                <input
-                  type="text"
-                  placeholder="0,00"
+                <label className="text-slate-500">Preço de custo</label>
+                <MoneyInput
                   value={formCostPrice}
-                  onChange={(e) => setFormCostPrice(e.target.value)}
+                  onChange={setFormCostPrice}
                   className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 font-mono"
                 />
               </div>
 
               <div className="space-y-1">
-                <label className="text-slate-500">Preço de Venda (R$) *</label>
-                <input
-                  type="text"
+                <label className="text-slate-500">Preço de venda *</label>
+                <MoneyInput
                   required
-                  placeholder="0,00"
                   value={formSalePrice}
-                  onChange={(e) => setFormSalePrice(e.target.value)}
+                  onChange={setFormSalePrice}
                   className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 font-mono font-bold text-blue-600"
                 />
               </div>

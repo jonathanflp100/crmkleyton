@@ -20,23 +20,25 @@ import {
   ExternalLink,
   Cake,
 } from 'lucide-react';
-import type { Client, Transaction, Deal, Task } from '../../../types';
+import type { Client, Transaction, Deal, Task, CompanyProfile } from '../../../types';
 import {
   formatCurrency,
   formatDate,
   formatDocument,
   formatPhone,
-  formatCEP,
-  validateCPF,
-  validateCNPJ,
+  formatAddress,
+  maskDocumentInput,
+  validateRUC,
+  whatsappLink,
 } from '../../../utils/formatters';
+import { AddressFields } from '../../common/AddressFields';
+import { printClientSheet } from '../../../services/printDocuments';
 import { Badge } from '../../common/Badge';
 import { Modal } from '../../common/Modal';
 import { ConfirmDialog } from '../../common/ConfirmDialog';
 import { EmptyState } from '../../common/EmptyState';
 import { Pagination } from '../../common/Pagination';
 import { FirestoreService } from '../../../services/firestoreService';
-import { lookupCep } from '../../../services/viaCepService';
 import { useAuth } from '../../../hooks/useAuth';
 import { useToast } from '../../../hooks/useToast';
 import { format } from 'date-fns';
@@ -46,6 +48,7 @@ interface ClientsViewProps {
   transactions: Transaction[];
   deals: Deal[];
   tasks: Task[];
+  company: CompanyProfile | null;
   openCreateClient?: boolean;
   onClearQuickAction?: () => void;
 }
@@ -55,6 +58,7 @@ export function ClientsView({
   transactions,
   deals,
   tasks,
+  company,
   openCreateClient = false,
   onClearQuickAction,
 }: ClientsViewProps) {
@@ -72,7 +76,10 @@ export function ClientsView({
   const [activeFichaTab, setActiveFichaTab] = useState<'dados' | 'negocios' | 'financeiro' | 'tarefas'>('dados');
 
   // Form Modal
-  const [isModalOpen, setIsModalOpen] = useState(openCreateClient);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  React.useEffect(() => {
+    if (openCreateClient) openNewModal();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [editingClient, setEditingClient] = useState<Client | null>(null);
 
   // Form fields
@@ -141,24 +148,6 @@ export function ClientsView({
     setIsModalOpen(true);
   };
 
-  // ViaCEP address autocomplete
-  const handleCepBlur = async () => {
-    if (!formCep) return;
-    const clean = formCep.replace(/\D/g, '');
-    if (clean.length === 8) {
-      const data = await lookupCep(clean);
-      if (data) {
-        setFormStreet(data.logradouro || '');
-        setFormNeighborhood(data.bairro || '');
-        setFormCity(data.localidade || '');
-        setFormState(data.uf || '');
-        success('Endereço preenchido via CEP!');
-      } else {
-        warning('CEP não encontrado.');
-      }
-    }
-  };
-
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formName.trim()) {
@@ -166,18 +155,15 @@ export function ClientsView({
       return;
     }
 
-    // CPF / CNPJ Validation
-    if (formDocument) {
-      const cleanDoc = formDocument.replace(/\D/g, '');
-      if (formType === 'PF' && cleanDoc.length === 11) {
-        if (!validateCPF(cleanDoc)) {
-          warning('Atenção: CPF digitado parece inválido.');
-        }
-      } else if (formType === 'PJ' && cleanDoc.length === 14) {
-        if (!validateCNPJ(cleanDoc)) {
-          warning('Atenção: CNPJ digitado parece inválido.');
-        }
-      }
+    // RUC: confere o dígito verificador (só avisa, não bloqueia)
+    if (formDocument.includes('-') && !validateRUC(formDocument)) {
+      warning('Atenção: o dígito verificador do RUC parece incorreto.');
+    }
+    const duplicate = formDocument
+      ? clients.find((c) => c.id !== editingClient?.id && c.document && c.document.replace(/\D/g, '') === formDocument.replace(/\D/g, ''))
+      : null;
+    if (duplicate) {
+      warning(`Já existe um cliente com este documento: ${duplicate.name}`);
     }
 
     const parsedTags = formTags
@@ -192,7 +178,7 @@ export function ClientsView({
           editingClient.id,
           {
             type: formType,
-            name: formName,
+            name: formName.trim(),
             document: formDocument,
             phone: formPhone,
             whatsapp: formWhatsapp,
@@ -217,7 +203,7 @@ export function ClientsView({
           'clients',
           {
             type: formType,
-            name: formName,
+            name: formName.trim(),
             document: formDocument,
             phone: formPhone,
             whatsapp: formWhatsapp,
@@ -263,10 +249,11 @@ export function ClientsView({
       if (searchTerm) {
         const query = searchTerm.toLowerCase();
         const matchName = c.name?.toLowerCase().includes(query);
-        const matchDoc = c.document?.includes(query);
+        const matchDoc = c.document?.replace(/\D/g, '').includes(query.replace(/\D/g, '') || '§');
+        const matchPhone = `${c.phone || ''} ${c.whatsapp || ''}`.replace(/\D/g, '').includes(query.replace(/\D/g, '') || '§');
         const matchEmail = c.email?.toLowerCase().includes(query);
         const matchCity = c.city?.toLowerCase().includes(query);
-        if (!matchName && !matchDoc && !matchEmail && !matchCity) return false;
+        if (!matchName && !matchDoc && !matchEmail && !matchCity && !matchPhone) return false;
       }
 
       return true;
@@ -323,7 +310,7 @@ export function ClientsView({
             <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
-              placeholder="Buscar por nome, CPF/CNPJ, e-mail ou cidade..."
+              placeholder="Buscar por nome, CI/RUC, telefone, e-mail ou cidade..."
               value={searchTerm}
               onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }}
               className="w-full pl-9 pr-3 py-1.5 text-xs rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100"
@@ -445,7 +432,7 @@ export function ClientsView({
                 <div className="flex items-center gap-1">
                   {client.whatsapp && (
                     <a
-                      href={`https://wa.me/55${client.whatsapp.replace(/\D/g, '')}`}
+                      href={whatsappLink(client.whatsapp) || '#'}
                       target="_blank"
                       rel="noopener noreferrer"
                       title="Conversar no WhatsApp"
@@ -584,13 +571,7 @@ export function ClientsView({
                   <div>
                     <span className="text-slate-400">Endereço Completo:</span>
                     <p className="font-semibold text-slate-800 dark:text-slate-200 mt-0.5">
-                      {selectedClient.street
-                        ? `${selectedClient.street}, ${selectedClient.number || 'S/N'} ${
-                            selectedClient.complement ? `- ${selectedClient.complement}` : ''
-                          } - ${selectedClient.neighborhood || ''}, ${selectedClient.city || ''}/${
-                            selectedClient.state || ''
-                          } - CEP ${formatCEP(selectedClient.cep || '')}`
-                        : 'Não informado'}
+                      {formatAddress(selectedClient) || 'Não informado'}
                     </p>
                   </div>
                   <div>
@@ -703,11 +684,13 @@ export function ClientsView({
             {/* Bottom Actions */}
             <div className="flex items-center justify-between pt-3 border-t border-slate-200 dark:border-slate-700">
               <button
-                onClick={() => window.print()}
+                onClick={() =>
+                  printClientSheet(selectedClient, { transactions: clientTransactions, deals: clientDeals, tasks: clientTasks }, company)
+                }
                 className="px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-semibold flex items-center gap-2"
               >
                 <Printer className="w-4 h-4" />
-                Imprimir Ficha Cadastral
+                Imprimir ficha
               </button>
               <button
                 onClick={() => setSelectedClient(null)}
@@ -765,7 +748,7 @@ export function ClientsView({
               <input
                 type="text"
                 required
-                placeholder={formType === 'PJ' ? 'Ex: TechCorp Soluções Ltda' : 'Ex: João da Silva'}
+                placeholder={formType === 'PJ' ? 'Ex.: Comercial Ejemplo S.A.' : 'Ex.: Juan Pérez'}
                 value={formName}
                 onChange={(e) => setFormName(e.target.value)}
                 className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
@@ -774,13 +757,14 @@ export function ClientsView({
 
             <div className="space-y-1">
               <label className="font-semibold text-slate-700 dark:text-slate-300">
-                {formType === 'PJ' ? 'CNPJ' : 'CPF'}
+                {formType === 'PJ' ? 'RUC' : 'CI ou RUC'}
               </label>
               <input
                 type="text"
-                placeholder={formType === 'PJ' ? '00.000.000/0000-00' : '000.000.000-00'}
+                inputMode="numeric"
+                placeholder={formType === 'PJ' ? '80012345-6' : 'CI: 4512345 · RUC: 4512345-0'}
                 value={formDocument}
-                onChange={(e) => setFormDocument(e.target.value)}
+                onChange={(e) => setFormDocument(maskDocumentInput(e.target.value))}
                 className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 font-mono text-slate-900 dark:text-slate-100"
               />
             </div>
@@ -790,11 +774,11 @@ export function ClientsView({
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="space-y-1">
               <label className="font-semibold text-slate-700 dark:text-slate-300">
-                Telefone Fixo
+                Telefone
               </label>
               <input
-                type="text"
-                placeholder="(00) 0000-0000"
+                type="tel"
+                placeholder="021 123 456"
                 value={formPhone}
                 onChange={(e) => setFormPhone(e.target.value)}
                 className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
@@ -806,8 +790,8 @@ export function ClientsView({
                 WhatsApp / Celular
               </label>
               <input
-                type="text"
-                placeholder="(00) 90000-0000"
+                type="tel"
+                placeholder="0981 123 456"
                 value={formWhatsapp}
                 onChange={(e) => setFormWhatsapp(e.target.value)}
                 className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
@@ -828,85 +812,17 @@ export function ClientsView({
             </div>
           </div>
 
-          {/* Endereço com ViaCEP */}
-          <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700 space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="font-bold text-slate-700 dark:text-slate-300">Endereço (Busca por CEP)</span>
-              <span className="text-[10px] text-blue-600 dark:text-blue-400">ViaCEP integrado</span>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
-              <div className="space-y-1">
-                <label className="text-slate-500">CEP</label>
-                <input
-                  type="text"
-                  placeholder="00000-000"
-                  value={formCep}
-                  onChange={(e) => setFormCep(e.target.value)}
-                  onBlur={handleCepBlur}
-                  className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 font-mono"
-                />
-              </div>
-
-              <div className="sm:col-span-2 space-y-1">
-                <label className="text-slate-500">Logradouro / Rua</label>
-                <input
-                  type="text"
-                  placeholder="Rua, Avenida..."
-                  value={formStreet}
-                  onChange={(e) => setFormStreet(e.target.value)}
-                  className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-slate-500">Número</label>
-                <input
-                  type="text"
-                  placeholder="123"
-                  value={formNumber}
-                  onChange={(e) => setFormNumber(e.target.value)}
-                  className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-              <div className="space-y-1">
-                <label className="text-slate-500">Bairro</label>
-                <input
-                  type="text"
-                  placeholder="Bairro"
-                  value={formNeighborhood}
-                  onChange={(e) => setFormNeighborhood(e.target.value)}
-                  className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-slate-500">Cidade</label>
-                <input
-                  type="text"
-                  placeholder="Cidade"
-                  value={formCity}
-                  onChange={(e) => setFormCity(e.target.value)}
-                  className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-slate-500">Estado (UF)</label>
-                <input
-                  type="text"
-                  maxLength={2}
-                  placeholder="SP"
-                  value={formState}
-                  onChange={(e) => setFormState(e.target.value.toUpperCase())}
-                  className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-                />
-              </div>
-            </div>
-          </div>
+          <AddressFields
+            value={{ street: formStreet, number: formNumber, complement: formComplement, neighborhood: formNeighborhood, city: formCity, state: formState }}
+            onChange={(p) => {
+              if (p.street !== undefined) setFormStreet(p.street);
+              if (p.number !== undefined) setFormNumber(p.number);
+              if (p.complement !== undefined) setFormComplement(p.complement);
+              if (p.neighborhood !== undefined) setFormNeighborhood(p.neighborhood);
+              if (p.city !== undefined) setFormCity(p.city);
+              if (p.state !== undefined) setFormState(p.state);
+            }}
+          />
 
           {/* Origem, Data Nascimento, Tags */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">

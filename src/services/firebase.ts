@@ -1,7 +1,6 @@
 import { initializeApp, getApps, getApp, type FirebaseApp } from 'firebase/app';
 import { getAuth, type Auth } from 'firebase/auth';
-import { getFirestore, type Firestore } from 'firebase/firestore';
-import { getStorage, type FirebaseStorage } from 'firebase/storage';
+import { initializeFirestore, getFirestore, type Firestore } from 'firebase/firestore';
 
 export interface FirebaseConfigOptions {
   apiKey: string;
@@ -12,8 +11,8 @@ export interface FirebaseConfigOptions {
   appId: string;
 }
 
-// Read from environment variables (mandatory requirement)
-const envConfig: FirebaseConfigOptions = {
+// Lido das variáveis de ambiente (Cloudflare Pages > Settings > Environment variables)
+export const firebaseConfig: FirebaseConfigOptions = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || '',
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || '',
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || '',
@@ -24,76 +23,62 @@ const envConfig: FirebaseConfigOptions = {
 
 export function isFirebaseConfigured(): boolean {
   return Boolean(
-    envConfig.apiKey &&
-    envConfig.projectId &&
-    !envConfig.apiKey.includes('YourApiKeyHere') &&
-    !envConfig.projectId.includes('seu-projeto')
+    firebaseConfig.apiKey &&
+      firebaseConfig.projectId &&
+      !firebaseConfig.apiKey.includes('YourApiKeyHere') &&
+      !firebaseConfig.projectId.includes('seu-projeto')
   );
 }
 
 let app: FirebaseApp | undefined;
 let authInstance: Auth | undefined;
 let dbInstance: Firestore | undefined;
-let storageInstance: FirebaseStorage | undefined;
 
 try {
   if (isFirebaseConfigured()) {
-    if (!getApps().length) {
-      app = initializeApp(envConfig);
-    } else {
-      app = getApp();
-    }
+    app = getApps().length ? getApp() : initializeApp(firebaseConfig);
     authInstance = getAuth(app);
-    dbInstance = getFirestore(app);
     try {
-      storageInstance = getStorage(app);
-    } catch (e) {
-      console.warn('Firebase Storage not initialized:', e);
+      // ignoreUndefinedProperties: campos opcionais vazios (undefined) não quebram a gravação
+      dbInstance = initializeFirestore(app, { ignoreUndefinedProperties: true });
+    } catch {
+      dbInstance = getFirestore(app);
     }
   }
 } catch (error) {
-  console.error('Error initializing Firebase with environment variables:', error);
+  console.error('Erro ao inicializar o Firebase:', error);
 }
 
 export const firebaseApp = app;
 export const auth = authInstance as Auth;
 export const db = dbInstance as Firestore;
-export const storage = storageInstance as FirebaseStorage | undefined;
 
-export enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
+/**
+ * App secundário usado só para o admin criar contas de funcionários
+ * sem ser deslogado (createUserWithEmailAndPassword loga automaticamente na conta criada).
+ */
+export function getSecondaryAuth(): Auth {
+  const name = 'secondary-user-creator';
+  const existing = getApps().find((a) => a.name === name);
+  const secondary = existing || initializeApp(firebaseConfig, name);
+  return getAuth(secondary);
 }
 
-export interface FirestoreErrorInfo {
-  error: string;
-  operationType: OperationType;
-  path: string | null;
-  authInfo: {
-    userId?: string | null;
-    email?: string | null;
-    emailVerified?: boolean | null;
-    isAnonymous?: boolean | null;
+/** Traduz erros comuns do Firebase para português */
+export function friendlyFirebaseError(err: any): string {
+  const code: string = err?.code || '';
+  const map: Record<string, string> = {
+    'auth/invalid-credential': 'E-mail ou senha incorretos.',
+    'auth/wrong-password': 'E-mail ou senha incorretos.',
+    'auth/user-not-found': 'E-mail ou senha incorretos.',
+    'auth/invalid-email': 'E-mail inválido.',
+    'auth/email-already-in-use': 'Este e-mail já está cadastrado.',
+    'auth/weak-password': 'A senha precisa ter pelo menos 6 caracteres.',
+    'auth/too-many-requests': 'Muitas tentativas. Aguarde alguns minutos e tente de novo.',
+    'auth/network-request-failed': 'Sem conexão com a internet.',
+    'permission-denied': 'Você não tem permissão para fazer isso.',
+    unavailable: 'Servidor indisponível. Verifique sua internet.',
   };
-}
-
-export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): never {
-  const currentAuth = auth?.currentUser;
-  const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    operationType,
-    path,
-    authInfo: {
-      userId: currentAuth?.uid || null,
-      email: currentAuth?.email || null,
-      emailVerified: currentAuth?.emailVerified || null,
-      isAnonymous: currentAuth?.isAnonymous || null,
-    },
-  };
-  console.error('Firestore Error:', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
+  if (map[code]) return map[code];
+  return err?.message || 'Ocorreu um erro inesperado.';
 }

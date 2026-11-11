@@ -1,66 +1,59 @@
-import { writeBatch, doc, getDocs, collection } from 'firebase/firestore';
-import { db } from './firebase';
+import { subMonths, addDays, subDays, format, setDate } from 'date-fns';
+import { backend, type WriteOp } from './backend';
 import { FirestoreService } from './firestoreService';
-import { subMonths, addDays, subDays, format } from 'date-fns';
 import type {
-  Client,
-  Supplier,
-  Product,
-  Deal,
   Account,
+  Actor,
   Category,
-  Transaction,
-  CompanyProfile,
+  Client,
+  Deal,
+  KanbanColumn,
+  Product,
+  Proposal,
+  Supplier,
   Task,
+  Transaction,
 } from '../types';
+
+/* ================= PADRÕES DO SISTEMA ================= */
 
 export const DEFAULT_CATEGORIES: Category[] = [
   { id: 'cat_vendas', name: 'Vendas de Produtos', type: 'income', color: '#10b981' },
   { id: 'cat_servicos', name: 'Prestação de Serviços', type: 'income', color: '#3b82f6' },
-  { id: 'cat_rendimentos', name: 'Rendimentos Financeiros', type: 'income', color: '#8b5cf6' },
   { id: 'cat_outras_rec', name: 'Outras Receitas', type: 'income', color: '#06b6d4' },
-  { id: 'cat_aluguel', name: 'Aluguel e Condomínio', type: 'expense', color: '#ef4444' },
-  { id: 'cat_salarios', name: 'Salários e Encargos', type: 'expense', color: '#f97316' },
-  { id: 'cat_fornecedores', name: 'Fornecedores e Matéria-Prima', type: 'expense', color: '#eab308' },
-  { id: 'cat_impostos', name: 'Impostos e Taxas', type: 'expense', color: '#dc2626' },
-  { id: 'cat_marketing', name: 'Marketing e Vendas', type: 'expense', color: '#ec4899' },
-  { id: 'cat_utilidades', name: 'Água, Luz e Internet', type: 'expense', color: '#6366f1' },
-  { id: 'cat_transporte', name: 'Transporte e Combustível', type: 'expense', color: '#64748b' },
-  { id: 'cat_manutencao', name: 'Manutenção e TI', type: 'expense', color: '#78716c' },
+  { id: 'cat_aluguel', name: 'Aluguel', type: 'expense', color: '#ef4444' },
+  { id: 'cat_salarios', name: 'Salários e IPS', type: 'expense', color: '#f97316' },
+  { id: 'cat_fornecedores', name: 'Fornecedores / Mercadoria', type: 'expense', color: '#eab308' },
+  { id: 'cat_impostos', name: 'Impostos (IVA, IRE)', type: 'expense', color: '#dc2626' },
+  { id: 'cat_marketing', name: 'Marketing e Publicidade', type: 'expense', color: '#ec4899' },
+  { id: 'cat_utilidades', name: 'Luz (ANDE), Água e Internet', type: 'expense', color: '#6366f1' },
+  { id: 'cat_transporte', name: 'Combustível e Transporte', type: 'expense', color: '#64748b' },
+  { id: 'cat_manutencao', name: 'Manutenção', type: 'expense', color: '#78716c' },
   { id: 'cat_outras_desp', name: 'Outras Despesas', type: 'expense', color: '#94a3b8' },
 ];
 
 export const DEFAULT_ACCOUNTS: Account[] = [
   {
-    id: 'acc_itau',
-    name: 'Banco Itaú Empresas',
-    type: 'bank',
-    bankName: 'Itaú Unibanco',
-    initialBalance: 15000.0,
-    currentBalance: 42350.8,
-    color: '#ec7000',
+    id: 'acc_caixa',
+    name: 'Caixa (Efetivo)',
+    type: 'cash',
+    initialBalance: 0,
+    currentBalance: 0,
+    color: '#10b981',
     isDefault: true,
   },
   {
-    id: 'acc_bb',
-    name: 'Banco do Brasil',
+    id: 'acc_banco',
+    name: 'Conta Bancária',
     type: 'bank',
-    bankName: 'Banco do Brasil',
-    initialBalance: 10000.0,
-    currentBalance: 18450.0,
-    color: '#003882',
-  },
-  {
-    id: 'acc_caixa',
-    name: 'Caixa Pequeno / Espécie',
-    type: 'cash',
-    initialBalance: 1000.0,
-    currentBalance: 3120.0,
-    color: '#10b981',
+    initialBalance: 0,
+    currentBalance: 0,
+    color: '#2563eb',
   },
 ];
 
-export const KANBAN_STAGES = [
+/** Etapas padrão do funil. "ganho" e "perdido" são fixas (o sistema depende delas). */
+export const KANBAN_STAGES: KanbanColumn[] = [
   { id: 'novo', title: 'Novo Contato', color: '#64748b' },
   { id: 'negociacao', title: 'Em Negociação', color: '#3b82f6' },
   { id: 'proposta', title: 'Proposta Enviada', color: '#f59e0b' },
@@ -68,810 +61,231 @@ export const KANBAN_STAGES = [
   { id: 'perdido', title: 'Perdido', color: '#ef4444', isLost: true },
 ];
 
-export async function loadDemoData(user?: { uid: string; name: string }): Promise<void> {
-  if (!db) throw new Error('Firebase não está conectado.');
+/* ================= DADOS DE DEMONSTRAÇÃO ================= */
+// Todo registro de demonstração leva isDemo: true, para poder ser apagado sem tocar nos dados reais.
 
-  const batch = writeBatch(db);
+const DEMO_COLLECTIONS = [
+  'clients',
+  'suppliers',
+  'products',
+  'deals',
+  'deal_interactions',
+  'transactions',
+  'tasks',
+  'proposals',
+  'transfers',
+  'accounts',
+];
+
+export async function loadDemoData(user?: Actor): Promise<void> {
   const now = new Date();
+  const d = (date: Date) => format(date, 'yyyy-MM-dd');
+  const ops: WriteOp[] = [];
+  const put = (col: string, item: { id: string } & Record<string, any>) =>
+    ops.push({ type: 'set', col, id: item.id, data: { ...item, isDemo: true, createdAt: item.createdAt || now.toISOString() } });
 
-  // 1. Company Profile
-  const companyProfile: CompanyProfile = {
-    name: 'Gestor Pro Soluções e Tecnologia Ltda',
-    tradingName: 'Gestor Pro Soluções',
-    document: '28.192.384/0001-45',
-    email: 'contato@gestorpro.com.br',
-    phone: '(11) 3280-9900',
-    whatsapp: '11987654321',
-    website: 'https://gestorpro.com.br',
-    cep: '01310-100',
-    street: 'Avenida Paulista',
-    number: '1200',
-    complement: 'Conjunto 810',
-    neighborhood: 'Bela Vista',
-    city: 'São Paulo',
-    state: 'SP',
-    receiptNotes: 'Agradecemos a sua preferência! Documento emitido para fins de comprovação interna.',
-    updatedAt: now.toISOString(),
-    updatedBy: user?.name || 'Administrador',
-  };
-  batch.set(doc(db, 'company', 'profile'), companyProfile);
-
-  // 2. Default Accounts & Categories
-  for (const acc of DEFAULT_ACCOUNTS) {
-    batch.set(doc(db, 'accounts', acc.id), acc);
+  // Empresa (só preenche se ainda não houver cadastro)
+  const company = await backend.get('company', 'profile');
+  if (!company) {
+    ops.push({
+      type: 'set',
+      col: 'company',
+      id: 'profile',
+      data: {
+        name: 'Empresa Demonstração S.A.',
+        tradingName: 'Demo Comercial',
+        document: '80012345-0',
+        email: 'contato@demo.com.py',
+        phone: '021 600 123',
+        whatsapp: '0981 123 456',
+        street: 'Avda. Mariscal López',
+        number: '1234',
+        neighborhood: 'Villa Morra',
+        city: 'Asunción',
+        state: 'Asunción (Capital)',
+        receiptNotes: 'Obrigado pela preferência!',
+        updatedAt: now.toISOString(),
+      },
+    });
   }
-  for (const cat of DEFAULT_CATEGORIES) {
-    batch.set(doc(db, 'categories', cat.id), cat);
-  }
 
-  // 3. Clients
+  // Contas padrão (sem marca de demo, para não sumirem ao apagar a demonstração) + uma conta demo
+  const existingAccounts = await backend.getAll<Account>('accounts');
+  DEFAULT_ACCOUNTS.forEach((a) => {
+    if (!existingAccounts.some((x) => x.id === a.id)) {
+      ops.push({ type: 'set', col: 'accounts', id: a.id, data: { ...a, createdAt: now.toISOString() } });
+    }
+  });
+  put('accounts', { id: 'acc_demo_reserva', name: 'Reserva (demo)', type: 'bank', bankName: 'Demo', initialBalance: 20_000_000, currentBalance: 0, color: '#7c3aed' });
+  const existingCategories = await backend.getAll<Category>('categories');
+  DEFAULT_CATEGORIES.forEach((c) => {
+    if (!existingCategories.some((x) => x.id === c.id)) {
+      ops.push({ type: 'set', col: 'categories', id: c.id, data: { ...c, createdAt: now.toISOString() } });
+    }
+  });
+
+  // Clientes
   const clients: Client[] = [
-    {
-      id: 'cli_techcorp',
-      type: 'PJ',
-      name: 'TechCorp Soluções Digitais Ltda',
-      document: '45.123.789/0001-12',
-      phone: '(11) 3140-5500',
-      whatsapp: '11998765432',
-      email: 'compras@techcorp.com.br',
-      cep: '04543-011',
-      street: 'Av. Brigadeiro Faria Lima',
-      number: '3477',
-      complement: '14º andar',
-      neighborhood: 'Itaim Bibi',
-      city: 'São Paulo',
-      state: 'SP',
-      source: 'Google Ads',
-      notes: 'Cliente corporativo com faturamento mensal. Contrato com SLA de 4 horas.',
-      tags: ['VIP', 'Recorrente', 'Corporativo'],
-      createdAt: subMonths(now, 5).toISOString(),
-    },
-    {
-      id: 'cli_mariana',
-      type: 'PF',
-      name: 'Mariana Souza Alcantara',
-      document: '215.894.638-40',
-      phone: '(11) 98455-1234',
-      whatsapp: '11984551234',
-      email: 'mariana.alcantara@gmail.com',
-      cep: '01415-000',
-      street: 'Rua Bela Cintra',
-      number: '1850',
-      neighborhood: 'Consolação',
-      city: 'São Paulo',
-      state: 'SP',
-      birthDate: '1988-11-15',
-      source: 'Indicação',
-      notes: 'Aniversariante de Novembro. Sempre solicita recibo por e-mail.',
-      tags: ['Pessoa Física', 'Pontual'],
-      createdAt: subMonths(now, 4).toISOString(),
-    },
-    {
-      id: 'cli_sabor',
-      type: 'PJ',
-      name: 'Restaurante Sabor & Arte Eireli',
-      document: '18.445.987/0001-34',
-      phone: '(11) 2233-8899',
-      whatsapp: '11977665544',
-      email: 'financeiro@saborearte.com.br',
-      cep: '05407-002',
-      street: 'Rua dos Pinheiros',
-      number: '450',
-      neighborhood: 'Pinheiros',
-      city: 'São Paulo',
-      state: 'SP',
-      source: 'Instagram',
-      notes: 'Rede de 3 restaurantes. Negociando implantação de software nas demais filiais.',
-      tags: ['Restaurante', 'Em expansão'],
-      createdAt: subMonths(now, 3).toISOString(),
-    },
-    {
-      id: 'cli_lucas',
-      type: 'PF',
-      name: 'Lucas Oliveira Martins',
-      document: '388.945.128-09',
-      phone: '(21) 99123-4567',
-      whatsapp: '21991234567',
-      email: 'lucas.martins@outlook.com',
-      cep: '22041-001',
-      street: 'Av. Nossa Senhora de Copacabana',
-      number: '680',
-      neighborhood: 'Copacabana',
-      city: 'Rio de Janeiro',
-      state: 'RJ',
-      birthDate: '1992-04-20',
-      source: 'Evento Tech Summit',
-      notes: 'Consultor independente de TI.',
-      tags: ['Consultoria', 'Remoto'],
-      createdAt: subMonths(now, 2).toISOString(),
-    },
-    {
-      id: 'cli_progresso',
-      type: 'PJ',
-      name: 'Distribuidora Progresso S.A.',
-      document: '62.987.321/0001-55',
-      phone: '(19) 3871-2000',
-      whatsapp: '19981112233',
-      email: 'fiscal@distprogresso.com.br',
-      cep: '13010-000',
-      street: 'Av. Francisco Glicério',
-      number: '1400',
-      neighborhood: 'Centro',
-      city: 'Campinas',
-      state: 'SP',
-      source: 'Prospecção Ativa',
-      notes: 'Grande volume de pedidos trimestrais.',
-      tags: ['Atacado', 'Alto Volume'],
-      createdAt: subMonths(now, 6).toISOString(),
-    },
+    { id: 'cli_demo_1', type: 'PJ', name: 'Distribuidora del Este S.A.', document: '80045678-1', phone: '061 512 300', whatsapp: '0983 456 789', email: 'compras@deleste.com.py', street: 'Avda. San Blas', number: '450', neighborhood: 'Centro', city: 'Ciudad del Este', state: 'Alto Paraná', source: 'Indicação', tags: ['VIP', 'Atacado'], createdAt: subMonths(now, 6).toISOString() },
+    { id: 'cli_demo_2', type: 'PJ', name: 'Restaurante Sabor Guaraní', document: '80098765-4', phone: '021 222 333', whatsapp: '0971 222 333', email: 'admin@saborguarani.com.py', street: 'Calle Palma', number: '780', neighborhood: 'Centro', city: 'Asunción', state: 'Asunción (Capital)', source: 'Instagram', tags: ['Restaurante'], createdAt: subMonths(now, 4).toISOString() },
+    { id: 'cli_demo_3', type: 'PF', name: 'María José Benítez', document: '3456789', whatsapp: '0985 111 222', email: 'mariajose@gmail.com', city: 'Encarnación', state: 'Itapúa', birthDate: `1990-${format(now, 'MM')}-18`, source: 'Google', tags: [], createdAt: subMonths(now, 3).toISOString() },
+    { id: 'cli_demo_4', type: 'PF', name: 'Carlos Rodrigues da Silva', document: '5123456', whatsapp: '0994 555 666', email: 'carlos.silva@hotmail.com', city: 'Pedro Juan Caballero', state: 'Amambay', source: 'Indicação', tags: ['Brasileiro'], createdAt: subMonths(now, 2).toISOString() },
+    { id: 'cli_demo_5', type: 'PJ', name: 'Agro Santa Rosa S.R.L.', document: '80033221-6', phone: '0431 20 100', whatsapp: '0982 333 444', email: 'financeiro@agrosantarosa.com.py', city: 'Santa Rosa del Aguaray', state: 'San Pedro', source: 'Feira / Evento', tags: ['Agro'], createdAt: subMonths(now, 1).toISOString() },
   ];
-  for (const c of clients) {
-    batch.set(doc(db, 'clients', c.id), c);
-  }
+  clients.forEach((c) => put('clients', c as any));
 
-  // 4. Suppliers
+  // Fornecedores
   const suppliers: Supplier[] = [
-    {
-      id: 'sup_dell',
-      type: 'PJ',
-      name: 'Dell Computadores do Brasil Ltda',
-      document: '72.381.189/0001-10',
-      phone: '0800-701-1268',
-      email: 'vendas_empresas@dell.com',
-      cep: '92990-000',
-      street: 'Av. Industrial',
-      number: '500',
-      neighborhood: 'Distrito Industrial',
-      city: 'Eldorado do Sul',
-      state: 'RS',
-      contactPerson: 'Carlos Eduardo Ramos',
-      bankInfo: 'Banco Santander - Ag: 3340 C/C: 1300994-1',
-      notes: 'Fornecedor homologado de equipamentos e servidores.',
-      tags: ['Hardware', 'Homologado'],
-      createdAt: subMonths(now, 6).toISOString(),
-    },
-    {
-      id: 'sup_imobiliaria',
-      type: 'PJ',
-      name: 'Imobiliária Prime Paulista S/C',
-      document: '51.984.321/0001-88',
-      phone: '(11) 3344-9988',
-      email: 'locacao@primepaulista.com.br',
-      cep: '01311-000',
-      street: 'Alameda Santos',
-      number: '900',
-      neighborhood: 'Cerqueira César',
-      city: 'São Paulo',
-      state: 'SP',
-      contactPerson: 'Renata Vasconcelos',
-      pixKey: 'financeiro@primepaulista.com.br',
-      notes: 'Locação do escritório matriz. Vencimento no dia 10 de cada mês.',
-      tags: ['Aluguel', 'Recorrente'],
-      createdAt: subMonths(now, 6).toISOString(),
-    },
-    {
-      id: 'sup_enel',
-      type: 'PJ',
-      name: 'Enel Distribuição São Paulo',
-      document: '61.695.227/0001-93',
-      phone: '0800-7272-120',
-      email: 'contato@eneldistribuicao.com.br',
-      city: 'Barueri',
-      state: 'SP',
-      notes: 'Concessionária de energia elétrica.',
-      tags: ['Concessionária', 'Utilidades'],
-      createdAt: subMonths(now, 6).toISOString(),
-    },
+    { id: 'sup_demo_1', type: 'PJ', name: 'Importadora Central S.A.', document: '80011122-3', phone: '021 555 000', whatsapp: '0981 555 000', email: 'ventas@importadoracentral.com.py', city: 'Asunción', state: 'Asunción (Capital)', contactPerson: 'Rodrigo Giménez', bankInfo: 'Banco Continental — Cta. 1234567', createdAt: subMonths(now, 6).toISOString() },
+    { id: 'sup_demo_2', type: 'PJ', name: 'Logística Rápida S.R.L.', document: '80077788-2', whatsapp: '0972 777 888', city: 'Luque', state: 'Central', contactPerson: 'Ana Duarte', createdAt: subMonths(now, 5).toISOString() },
   ];
-  for (const s of suppliers) {
-    batch.set(doc(db, 'suppliers', s.id), s);
-  }
+  suppliers.forEach((s) => put('suppliers', s as any));
 
-  // 5. Products & Services
+  // Produtos e serviços
   const products: Product[] = [
-    {
-      id: 'prod_consultoria',
-      code: 'SRV-001',
-      name: 'Consultoria Estratégica em TI (Hora)',
-      type: 'service',
-      costPrice: 80.0,
-      salePrice: 220.0,
-      marginPercent: 63.6,
-      stockQuantity: 999,
-      minStockQuantity: 0,
-      unit: 'hr',
-      notes: 'Cobrado por hora de especialista técnico.',
-      createdAt: subMonths(now, 6).toISOString(),
-    },
-    {
-      id: 'prod_implantacao',
-      code: 'SRV-002',
-      name: 'Implantação Completa do Sistema ERP',
-      type: 'service',
-      costPrice: 1200.0,
-      salePrice: 4500.0,
-      marginPercent: 73.3,
-      stockQuantity: 999,
-      minStockQuantity: 0,
-      unit: 'un',
-      notes: 'Inclui parametrização, migração de dados e treinamento de até 10 usuários.',
-      createdAt: subMonths(now, 6).toISOString(),
-    },
-    {
-      id: 'prod_mensalidade',
-      code: 'SRV-003',
-      name: 'Licença Mensal Gestor Pro Cloud',
-      type: 'service',
-      costPrice: 25.0,
-      salePrice: 189.9,
-      marginPercent: 86.8,
-      stockQuantity: 999,
-      minStockQuantity: 0,
-      unit: 'mês',
-      notes: 'Assinatura mensal com suporte e backup diário.',
-      createdAt: subMonths(now, 6).toISOString(),
-    },
-    {
-      id: 'prod_servidor',
-      code: 'HRD-001',
-      name: 'Servidor Dell PowerEdge T150 Xeon',
-      type: 'product',
-      costPrice: 3200.0,
-      salePrice: 5490.0,
-      marginPercent: 41.7,
-      stockQuantity: 4,
-      minStockQuantity: 2,
-      unit: 'un',
-      notes: 'Garantia de 3 anos on-site com a Dell.',
-      createdAt: subMonths(now, 6).toISOString(),
-    },
-    {
-      id: 'prod_nobreak',
-      code: 'HRD-002',
-      name: 'No-Break Senoidal APC 1500VA Bivolt',
-      type: 'product',
-      costPrice: 790.0,
-      salePrice: 1350.0,
-      marginPercent: 41.5,
-      stockQuantity: 1, // Alerta: abaixo do estoque mínimo!
-      minStockQuantity: 3,
-      unit: 'un',
-      notes: 'Atenção: Estoque crítico!',
-      createdAt: subMonths(now, 6).toISOString(),
-    },
-    {
-      id: 'prod_switch',
-      code: 'HRD-003',
-      name: 'Switch Gigabit 24 Portas Gerenciável',
-      type: 'product',
-      costPrice: 450.0,
-      salePrice: 890.0,
-      marginPercent: 49.4,
-      stockQuantity: 6,
-      minStockQuantity: 2,
-      unit: 'un',
-      notes: 'Equipamento para infraestrutura de rede corporativa.',
-      createdAt: subMonths(now, 6).toISOString(),
-    },
+    { id: 'prod_demo_1', code: 'P-001', name: 'Notebook 15" i5 16GB', type: 'product', costPrice: 3_800_000, salePrice: 5_200_000, marginPercent: 26.9, stockQuantity: 6, minStockQuantity: 2, unit: 'un', createdAt: now.toISOString() },
+    { id: 'prod_demo_2', code: 'P-002', name: 'Monitor 24" Full HD', type: 'product', costPrice: 750_000, salePrice: 1_150_000, marginPercent: 34.8, stockQuantity: 1, minStockQuantity: 3, unit: 'un', createdAt: now.toISOString() },
+    { id: 'prod_demo_3', code: 'P-003', name: 'Kit teclado + mouse sem fio', type: 'product', costPrice: 120_000, salePrice: 210_000, marginPercent: 42.9, stockQuantity: 25, minStockQuantity: 5, unit: 'un', createdAt: now.toISOString() },
+    { id: 'serv_demo_1', code: 'S-001', name: 'Instalação e configuração', type: 'service', costPrice: 0, salePrice: 350_000, marginPercent: 100, stockQuantity: 0, minStockQuantity: 0, unit: 'hr', createdAt: now.toISOString() },
+    { id: 'serv_demo_2', code: 'S-002', name: 'Suporte técnico mensal', type: 'service', costPrice: 400_000, salePrice: 1_500_000, marginPercent: 73.3, stockQuantity: 0, minStockQuantity: 0, unit: 'mes', createdAt: now.toISOString() },
   ];
-  for (const p of products) {
-    batch.set(doc(db, 'products', p.id), p);
-  }
+  products.forEach((p) => put('products', p as any));
 
-  // 6. CRM Deals
+  // Funil (CRM)
   const deals: Deal[] = [
-    {
-      id: 'deal_1',
-      title: 'Renovação Anual Contrato TI - TechCorp',
-      clientId: 'cli_techcorp',
-      clientName: 'TechCorp Soluções Digitais Ltda',
-      clientPhone: '(11) 3140-5500',
-      clientEmail: 'compras@techcorp.com.br',
-      value: 18500.0,
-      stageId: 'negociacao',
-      stageName: 'Em Negociação',
-      assignedToUserName: 'Rodrigo Vendas',
-      expectedCloseDate: format(addDays(now, 10), 'yyyy-MM-dd'),
-      priority: 'high',
-      tags: ['Renovação', 'Recorrente', 'VIP'],
-      notes: 'Reunião marcada com o diretor financeiro para apresentação do escopo.',
-      createdAt: subDays(now, 15).toISOString(),
-    },
-    {
-      id: 'deal_2',
-      title: 'Implantação ERP + 2 No-breaks - Sabor & Arte',
-      clientId: 'cli_sabor',
-      clientName: 'Restaurante Sabor & Arte Eireli',
-      clientPhone: '(11) 2233-8899',
-      clientEmail: 'financeiro@saborearte.com.br',
-      value: 7200.0,
-      stageId: 'proposta',
-      stageName: 'Proposta Enviada',
-      assignedToUserName: 'Ana Comercial',
-      expectedCloseDate: format(addDays(now, 5), 'yyyy-MM-dd'),
-      priority: 'medium',
-      tags: ['Proposta', 'Restaurante'],
-      notes: 'Orçamento enviado por PDF e WhatsApp. Aguardando aceite da diretoria.',
-      createdAt: subDays(now, 7).toISOString(),
-    },
-    {
-      id: 'deal_3',
-      title: 'Expansão de Infraestrutura de Servidores - Progresso',
-      clientId: 'cli_progresso',
-      clientName: 'Distribuidora Progresso S.A.',
-      clientPhone: '(19) 3871-2000',
-      value: 27450.0,
-      stageId: 'novo',
-      stageName: 'Novo Contato',
-      assignedToUserName: 'Rodrigo Vendas',
-      expectedCloseDate: format(addDays(now, 25), 'yyyy-MM-dd'),
-      priority: 'high',
-      tags: ['Infraestrutura', 'Hardware'],
-      notes: 'Recebido contato pelo site solicitando cotação para 3 servidores e migração.',
-      createdAt: subDays(now, 2).toISOString(),
-    },
-    {
-      id: 'deal_4',
-      title: 'Pacote de Consultoria Mensal 30h - Lucas Martins',
-      clientId: 'cli_lucas',
-      clientName: 'Lucas Oliveira Martins',
-      clientPhone: '(21) 99123-4567',
-      value: 6600.0,
-      stageId: 'ganho',
-      stageName: 'Fechado / Ganho',
-      assignedToUserName: 'Ana Comercial',
-      expectedCloseDate: format(subDays(now, 3), 'yyyy-MM-dd'),
-      priority: 'medium',
-      tags: ['Ganho', 'Consultoria'],
-      wonDate: format(subDays(now, 3), 'yyyy-MM-dd'),
-      notes: 'Contrato assinado digitalmente e primeira parcela faturada.',
-      createdAt: subDays(now, 20).toISOString(),
-    },
-    {
-      id: 'deal_5',
-      title: 'Projeto Piloto Automação Comercial - Alpha Ltda',
-      clientId: 'cli_mariana',
-      clientName: 'Mariana Souza Alcantara',
-      value: 4800.0,
-      stageId: 'perdido',
-      stageName: 'Perdido',
-      assignedToUserName: 'Rodrigo Vendas',
-      priority: 'low',
-      tags: ['Perdido'],
-      lostDate: format(subDays(now, 12), 'yyyy-MM-dd'),
-      lossReason: 'Orçamento acima do valor pretendido pelo cliente neste momento.',
-      createdAt: subDays(now, 30).toISOString(),
-    },
+    { id: 'deal_demo_1', title: 'Renovação de contrato anual', clientId: 'cli_demo_1', clientName: clients[0].name, clientPhone: clients[0].whatsapp, value: 18_000_000, stageId: 'negociacao', stageName: 'Em Negociação', assignedToUserName: 'Vendas', expectedCloseDate: d(addDays(now, 10)), priority: 'high', tags: ['Renovação', 'VIP'], notes: 'Reunião marcada com o gerente financeiro.', createdAt: subDays(now, 15).toISOString() },
+    { id: 'deal_demo_2', title: '5 notebooks para o escritório', clientId: 'cli_demo_2', clientName: clients[1].name, clientPhone: clients[1].whatsapp, value: 26_000_000, stageId: 'proposta', stageName: 'Proposta Enviada', assignedToUserName: 'Vendas', expectedCloseDate: d(addDays(now, 5)), priority: 'medium', tags: ['Hardware'], createdAt: subDays(now, 7).toISOString() },
+    { id: 'deal_demo_3', title: 'Suporte técnico mensal', clientId: 'cli_demo_5', clientName: clients[4].name, clientPhone: clients[4].whatsapp, value: 1_500_000, stageId: 'novo', stageName: 'Novo Contato', assignedToUserName: 'Vendas', expectedCloseDate: d(addDays(now, 20)), priority: 'low', tags: ['Serviço'], createdAt: subDays(now, 2).toISOString() },
+    { id: 'deal_demo_4', title: 'Monitores para a loja', clientId: 'cli_demo_4', clientName: clients[3].name, clientPhone: clients[3].whatsapp, value: 3_450_000, stageId: 'ganho', stageName: 'Fechado / Ganho', assignedToUserName: 'Vendas', wonDate: d(subDays(now, 3)), priority: 'medium', tags: [], createdAt: subDays(now, 20).toISOString() },
+    { id: 'deal_demo_5', title: 'Projeto de rede', clientId: 'cli_demo_3', clientName: clients[2].name, clientPhone: clients[2].whatsapp, value: 4_800_000, stageId: 'perdido', stageName: 'Perdido', lostDate: d(subDays(now, 12)), lossReason: 'Preço / Orçamento fora do limite', priority: 'low', tags: [], createdAt: subDays(now, 30).toISOString() },
   ];
-  for (const d of deals) {
-    batch.set(doc(db, 'deals', d.id), d);
-  }
+  deals.forEach((x) => put('deals', x as any));
+  put('deal_interactions', { id: 'int_demo_1', dealId: 'deal_demo_2', type: 'whatsapp', description: 'Orçamento enviado pelo WhatsApp, cliente vai responder até sexta.', date: d(subDays(now, 4)), userId: user?.uid || 'demo', userName: user?.name || 'Vendas', createdAt: subDays(now, 4).toISOString() });
 
-  // 7. Deal Interactions
-  const interactionId = `int_1`;
-  batch.set(doc(db, 'deal_interactions', interactionId), {
-    id: interactionId,
-    dealId: 'deal_2',
-    type: 'whatsapp',
-    description: 'Enviado o PDF da proposta comercial via WhatsApp para confirmação dos dados de faturamento.',
-    date: format(subDays(now, 4), 'yyyy-MM-dd'),
-    userId: user?.uid || 'user_1',
-    userName: 'Ana Comercial',
-    createdAt: subDays(now, 4).toISOString(),
-  });
+  // Orçamento
+  const proposal: Proposal = {
+    id: 'prop_demo_1',
+    number: `${now.getFullYear()}0001`,
+    clientId: 'cli_demo_2',
+    clientName: clients[1].name,
+    clientDocument: clients[1].document,
+    clientPhone: clients[1].whatsapp,
+    clientEmail: clients[1].email,
+    date: d(subDays(now, 6)),
+    validUntil: d(addDays(now, 9)),
+    status: 'sent',
+    items: [
+      { productId: 'prod_demo_1', productName: 'Notebook 15" i5 16GB', quantity: 5, unitPrice: 5_200_000, discount: 0, totalPrice: 26_000_000 },
+    ],
+    subtotal: 26_000_000,
+    discount: 0,
+    shipping: 0,
+    total: 26_000_000,
+    paymentConditions: 'À vista com 5% de desconto ou em 3x',
+    createdAt: subDays(now, 6).toISOString(),
+  };
+  put('proposals', proposal as any);
 
-  // 8. 6 Months of Financial Transactions (Paid, Pending, Overdue)
-  const transactions: Transaction[] = [];
-
-  // Generate historical data for past 5 months (all paid)
-  for (let m = 5; m >= 1; m--) {
-    const monthDate = subMonths(now, m);
-    const monthStr = format(monthDate, 'yyyy-MM');
-
-    // Incomes
-    transactions.push({
-      id: `tx_inc_${monthStr}_1`,
-      description: `Mensalidades Software Gestor Pro (${format(monthDate, 'MM/yyyy')})`,
-      amount: 14500.0 + m * 800,
-      type: 'income',
-      date: `${monthStr}-05`,
-      dueDate: `${monthStr}-05`,
-      paymentDate: `${monthStr}-05`,
-      categoryId: 'cat_servicos',
-      categoryName: 'Prestação de Serviços',
-      paymentMethod: 'pix',
-      status: 'paid',
-      entityType: 'none',
-      accountId: 'acc_itau',
-      accountName: 'Banco Itaú Empresas',
-      createdAt: `${monthStr}-01T10:00:00.000Z`,
-    });
-
-    transactions.push({
-      id: `tx_inc_${monthStr}_2`,
-      description: `Faturamento Venda Equipamentos e Servidores`,
-      amount: 9800.0 + m * 500,
-      type: 'income',
-      date: `${monthStr}-15`,
-      dueDate: `${monthStr}-15`,
-      paymentDate: `${monthStr}-15`,
-      categoryId: 'cat_vendas',
-      categoryName: 'Vendas de Produtos',
-      paymentMethod: 'bank_slip',
-      status: 'paid',
-      entityType: 'client',
-      entityId: 'cli_techcorp',
-      entityName: 'TechCorp Soluções Digitais Ltda',
-      accountId: 'acc_itau',
-      accountName: 'Banco Itaú Empresas',
-      createdAt: `${monthStr}-02T10:00:00.000Z`,
-    });
-
-    // Expenses
-    transactions.push({
-      id: `tx_exp_${monthStr}_aluguel`,
-      description: `Aluguel Escritório Av. Paulista (${format(monthDate, 'MM/yyyy')})`,
-      amount: 4200.0,
-      type: 'expense',
-      date: `${monthStr}-10`,
-      dueDate: `${monthStr}-10`,
-      paymentDate: `${monthStr}-10`,
-      categoryId: 'cat_aluguel',
-      categoryName: 'Aluguel e Condomínio',
+  // Financeiro: 6 meses de histórico
+  let n = 0;
+  const trx = (t: Partial<Transaction>) => {
+    n++;
+    put('transactions', {
+      id: `trx_demo_${n}`,
       paymentMethod: 'bank_transfer',
-      status: 'paid',
-      entityType: 'supplier',
-      entityId: 'sup_imobiliaria',
-      entityName: 'Imobiliária Prime Paulista S/C',
-      accountId: 'acc_itau',
-      accountName: 'Banco Itaú Empresas',
-      createdAt: `${monthStr}-01T10:00:00.000Z`,
+      accountId: 'acc_banco',
+      accountName: 'Conta Bancária',
+      createdAt: now.toISOString(),
+      ...t,
+    } as any);
+  };
+
+  for (let m = 5; m >= 0; m--) {
+    const base = subMonths(now, m);
+    const day = (n: number) => d(setDate(base, Math.min(n, 28)));
+    const isCurrent = m === 0;
+    const upToToday = (n: number) => !isCurrent || n <= now.getDate();
+
+    // Receitas
+    [
+      { dia: 5, desc: 'Venda de equipamentos', cli: 0, val: 14_500_000 + m * 600_000, cat: 'cat_vendas' },
+      { dia: 12, desc: 'Suporte técnico mensal', cli: 4, val: 1_500_000, cat: 'cat_servicos' },
+      { dia: 20, desc: 'Venda balcão', cli: 3, val: 3_200_000 + m * 150_000, cat: 'cat_vendas' },
+    ].forEach((r) => {
+      const paid = upToToday(r.dia);
+      trx({
+        description: r.desc,
+        amount: r.val,
+        type: 'income',
+        date: day(r.dia),
+        dueDate: day(r.dia),
+        paymentDate: paid ? day(r.dia) : undefined,
+        status: paid ? 'paid' : 'pending',
+        categoryId: r.cat,
+        categoryName: DEFAULT_CATEGORIES.find((c) => c.id === r.cat)?.name,
+        entityType: 'client',
+        entityId: clients[r.cli].id,
+        entityName: clients[r.cli].name,
+        paymentMethod: r.cli === 3 ? 'cash' : 'bank_transfer',
+        accountId: r.cli === 3 ? 'acc_caixa' : 'acc_banco',
+        accountName: r.cli === 3 ? 'Caixa (Efetivo)' : 'Conta Bancária',
+      });
     });
 
-    transactions.push({
-      id: `tx_exp_${monthStr}_salarios`,
-      description: `Folha de Pagamento da Equipe (${format(monthDate, 'MM/yyyy')})`,
-      amount: 11500.0,
-      type: 'expense',
-      date: `${monthStr}-05`,
-      dueDate: `${monthStr}-05`,
-      paymentDate: `${monthStr}-05`,
-      categoryId: 'cat_salarios',
-      categoryName: 'Salários e Encargos',
-      paymentMethod: 'bank_transfer',
-      status: 'paid',
-      entityType: 'none',
-      accountId: 'acc_bb',
-      accountName: 'Banco do Brasil',
-      createdAt: `${monthStr}-01T10:00:00.000Z`,
-    });
-
-    transactions.push({
-      id: `tx_exp_${monthStr}_utilidades`,
-      description: `Energia Elétrica Enel + Internet Fibra`,
-      amount: 850.0 + m * 20,
-      type: 'expense',
-      date: `${monthStr}-18`,
-      dueDate: `${monthStr}-18`,
-      paymentDate: `${monthStr}-18`,
-      categoryId: 'cat_utilidades',
-      categoryName: 'Água, Luz e Internet',
-      paymentMethod: 'pix',
-      status: 'paid',
-      entityType: 'supplier',
-      entityId: 'sup_enel',
-      entityName: 'Enel Distribuição São Paulo',
-      accountId: 'acc_itau',
-      accountName: 'Banco Itaú Empresas',
-      createdAt: `${monthStr}-05T10:00:00.000Z`,
-    });
-
-    transactions.push({
-      id: `tx_exp_${monthStr}_fornecedor`,
-      description: `Aquisição de Lote No-breaks e Peças Dell`,
-      amount: 3800.0,
-      type: 'expense',
-      date: `${monthStr}-22`,
-      dueDate: `${monthStr}-22`,
-      paymentDate: `${monthStr}-22`,
-      categoryId: 'cat_fornecedores',
-      categoryName: 'Fornecedores e Matéria-Prima',
-      paymentMethod: 'bank_slip',
-      status: 'paid',
-      entityType: 'supplier',
-      entityId: 'sup_dell',
-      entityName: 'Dell Computadores do Brasil Ltda',
-      accountId: 'acc_itau',
-      accountName: 'Banco Itaú Empresas',
-      createdAt: `${monthStr}-10T10:00:00.000Z`,
+    // Despesas
+    [
+      { dia: 5, desc: 'Aluguel do local', val: 4_500_000, cat: 'cat_aluguel' },
+      { dia: 10, desc: 'Salários da equipe', val: 6_500_000, cat: 'cat_salarios' },
+      { dia: 15, desc: 'Compra de mercadoria', val: 6_200_000 + m * 300_000, cat: 'cat_fornecedores', sup: 0 },
+      { dia: 18, desc: 'ANDE + internet', val: 950_000, cat: 'cat_utilidades' },
+      { dia: 25, desc: 'IVA do mês', val: 1_350_000, cat: 'cat_impostos' },
+      { dia: 8, desc: 'Combustível', val: 600_000, cat: 'cat_transporte', cash: true },
+    ].forEach((e: any) => {
+      const paid = upToToday(e.dia);
+      trx({
+        description: e.desc,
+        amount: e.val,
+        type: 'expense',
+        date: day(e.dia),
+        dueDate: day(e.dia),
+        paymentDate: paid ? day(e.dia) : undefined,
+        status: paid ? 'paid' : 'pending',
+        categoryId: e.cat,
+        categoryName: DEFAULT_CATEGORIES.find((c) => c.id === e.cat)?.name,
+        entityType: e.sup !== undefined ? 'supplier' : 'none',
+        entityId: e.sup !== undefined ? suppliers[e.sup].id : undefined,
+        entityName: e.sup !== undefined ? suppliers[e.sup].name : undefined,
+        paymentMethod: e.cash ? 'cash' : 'bank_transfer',
+        accountId: e.cash ? 'acc_caixa' : 'acc_banco',
+        accountName: e.cash ? 'Caixa (Efetivo)' : 'Conta Bancária',
+      });
     });
   }
 
-  // Current Month transactions (Includes paid, pending, and overdue!)
-  const curMonthStr = format(now, 'yyyy-MM');
+  // Uma conta vencida e uma a receber em 3 dias
+  trx({ description: 'Parcela atrasada — cliente', amount: 2_300_000, type: 'income', date: d(subDays(now, 20)), dueDate: d(subDays(now, 6)), status: 'pending', categoryId: 'cat_vendas', categoryName: 'Vendas de Produtos', entityType: 'client', entityId: 'cli_demo_3', entityName: clients[2].name });
+  trx({ description: 'Monitores para a loja', amount: 3_450_000, type: 'income', date: d(subDays(now, 3)), dueDate: d(addDays(now, 3)), status: 'pending', categoryId: 'cat_vendas', categoryName: 'Vendas de Produtos', entityType: 'client', entityId: 'cli_demo_4', entityName: clients[3].name, dealId: 'deal_demo_4' });
 
-  // Paid this month
-  transactions.push({
-    id: `tx_cur_inc_1`,
-    description: 'Consultoria Trimestral Lucas Oliveira (Parcela 1/3)',
-    amount: 2200.0,
-    type: 'income',
-    date: `${curMonthStr}-03`,
-    dueDate: `${curMonthStr}-03`,
-    paymentDate: `${curMonthStr}-03`,
-    categoryId: 'cat_servicos',
-    categoryName: 'Prestação de Serviços',
-    paymentMethod: 'pix',
-    status: 'paid',
-    entityType: 'client',
-    entityId: 'cli_lucas',
-    entityName: 'Lucas Oliveira Martins',
-    accountId: 'acc_itau',
-    accountName: 'Banco Itaú Empresas',
-    createdAt: now.toISOString(),
-  });
-
-  transactions.push({
-    id: `tx_cur_inc_2`,
-    description: 'Venda de Servidor Dell PowerEdge - TechCorp',
-    amount: 5490.0,
-    type: 'income',
-    date: `${curMonthStr}-08`,
-    dueDate: `${curMonthStr}-08`,
-    paymentDate: `${curMonthStr}-08`,
-    categoryId: 'cat_vendas',
-    categoryName: 'Vendas de Produtos',
-    paymentMethod: 'credit_card',
-    status: 'paid',
-    entityType: 'client',
-    entityId: 'cli_techcorp',
-    entityName: 'TechCorp Soluções Digitais Ltda',
-    accountId: 'acc_itau',
-    accountName: 'Banco Itaú Empresas',
-    createdAt: now.toISOString(),
-  });
-
-  transactions.push({
-    id: `tx_cur_exp_aluguel`,
-    description: `Aluguel Escritório Av. Paulista (${format(now, 'MM/yyyy')})`,
-    amount: 4200.0,
-    type: 'expense',
-    date: `${curMonthStr}-10`,
-    dueDate: `${curMonthStr}-10`,
-    paymentDate: `${curMonthStr}-10`,
-    categoryId: 'cat_aluguel',
-    categoryName: 'Aluguel e Condomínio',
-    paymentMethod: 'bank_transfer',
-    status: 'paid',
-    entityType: 'supplier',
-    entityId: 'sup_imobiliaria',
-    entityName: 'Imobiliária Prime Paulista S/C',
-    accountId: 'acc_itau',
-    accountName: 'Banco Itaú Empresas',
-    createdAt: now.toISOString(),
-  });
-
-  // PENDING upcoming in 3-7 days
-  transactions.push({
-    id: `tx_cur_pend_rec_1`,
-    description: 'Faturamento Mensal Software TechCorp',
-    amount: 6800.0,
-    type: 'income',
-    date: format(now, 'yyyy-MM-dd'),
-    dueDate: format(addDays(now, 4), 'yyyy-MM-dd'),
-    categoryId: 'cat_servicos',
-    categoryName: 'Prestação de Serviços',
-    paymentMethod: 'bank_slip',
-    status: 'pending',
-    entityType: 'client',
-    entityId: 'cli_techcorp',
-    entityName: 'TechCorp Soluções Digitais Ltda',
-    accountId: 'acc_itau',
-    accountName: 'Banco Itaú Empresas',
-    createdAt: now.toISOString(),
-  });
-
-  transactions.push({
-    id: `tx_cur_pend_rec_2`,
-    description: 'Orçamento Aprovado - Restaurante Sabor & Arte',
-    amount: 3600.0,
-    type: 'income',
-    date: format(now, 'yyyy-MM-dd'),
-    dueDate: format(addDays(now, 6), 'yyyy-MM-dd'),
-    categoryId: 'cat_servicos',
-    categoryName: 'Prestação de Serviços',
-    paymentMethod: 'pix',
-    status: 'pending',
-    entityType: 'client',
-    entityId: 'cli_sabor',
-    entityName: 'Restaurante Sabor & Arte Eireli',
-    accountId: 'acc_bb',
-    accountName: 'Banco do Brasil',
-    createdAt: now.toISOString(),
-  });
-
-  transactions.push({
-    id: `tx_cur_pend_pay_1`,
-    description: 'Enel Energia Elétrica Matriz',
-    amount: 940.5,
-    type: 'expense',
-    date: format(now, 'yyyy-MM-dd'),
-    dueDate: format(addDays(now, 3), 'yyyy-MM-dd'),
-    categoryId: 'cat_utilidades',
-    categoryName: 'Água, Luz e Internet',
-    paymentMethod: 'bank_slip',
-    status: 'pending',
-    entityType: 'supplier',
-    entityId: 'sup_enel',
-    entityName: 'Enel Distribuição São Paulo',
-    accountId: 'acc_itau',
-    accountName: 'Banco Itaú Empresas',
-    createdAt: now.toISOString(),
-  });
-
-  transactions.push({
-    id: `tx_cur_pend_pay_2`,
-    description: 'Fornecedor Dell - Fatura de Peças Reposição',
-    amount: 2450.0,
-    type: 'expense',
-    date: format(now, 'yyyy-MM-dd'),
-    dueDate: format(addDays(now, 7), 'yyyy-MM-dd'),
-    categoryId: 'cat_fornecedores',
-    categoryName: 'Fornecedores e Matéria-Prima',
-    paymentMethod: 'bank_slip',
-    status: 'pending',
-    entityType: 'supplier',
-    entityId: 'sup_dell',
-    entityName: 'Dell Computadores do Brasil Ltda',
-    accountId: 'acc_itau',
-    accountName: 'Banco Itaú Empresas',
-    createdAt: now.toISOString(),
-  });
-
-  // OVERDUE transaction (highlight in red on dashboard)
-  transactions.push({
-    id: `tx_cur_overdue_1`,
-    description: 'Manutenção Preventiva de Ar Condicionado',
-    amount: 680.0,
-    type: 'expense',
-    date: format(subDays(now, 10), 'yyyy-MM-dd'),
-    dueDate: format(subDays(now, 3), 'yyyy-MM-dd'),
-    categoryId: 'cat_manutencao',
-    categoryName: 'Manutenção e TI',
-    paymentMethod: 'bank_slip',
-    status: 'overdue',
-    entityType: 'none',
-    accountId: 'acc_caixa',
-    accountName: 'Caixa Pequeno / Espécie',
-    notes: 'Boleto vencido há 3 dias. Verificar acréscimo de juros.',
-    createdAt: subDays(now, 10).toISOString(),
-  });
-
-  transactions.push({
-    id: `tx_cur_overdue_rec`,
-    description: 'Mensalidade Suporte - Cliente Atrasado',
-    amount: 1250.0,
-    type: 'income',
-    date: format(subDays(now, 12), 'yyyy-MM-dd'),
-    dueDate: format(subDays(now, 4), 'yyyy-MM-dd'),
-    categoryId: 'cat_servicos',
-    categoryName: 'Prestação de Serviços',
-    paymentMethod: 'bank_slip',
-    status: 'overdue',
-    entityType: 'client',
-    entityId: 'cli_mariana',
-    entityName: 'Mariana Souza Alcantara',
-    accountId: 'acc_itau',
-    accountName: 'Banco Itaú Empresas',
-    notes: 'Cobrança enviada por WhatsApp para regularização.',
-    createdAt: subDays(now, 12).toISOString(),
-  });
-
-  for (const t of transactions) {
-    batch.set(doc(db, 'transactions', t.id), t);
-  }
-
-  // 9. Tasks & Schedule
+  // Tarefas
   const tasks: Task[] = [
-    {
-      id: 'task_1',
-      title: 'Apresentação comercial com diretor da TechCorp',
-      description: 'Apresentar escopo da renovação de contrato e novos SLAs de atendimento.',
-      dueDate: format(addDays(now, 2), 'yyyy-MM-dd'),
-      dueTime: '14:30',
-      priority: 'high',
-      status: 'pending',
-      assignedToUserName: 'Rodrigo Vendas',
-      clientId: 'cli_techcorp',
-      clientName: 'TechCorp Soluções Digitais Ltda',
-      dealId: 'deal_1',
-      dealTitle: 'Renovação Anual Contrato TI - TechCorp',
-      createdAt: now.toISOString(),
-    },
-    {
-      id: 'task_2',
-      title: 'Repor estoque de No-Breaks APC (Estoque Crítico)',
-      description: 'Cotar lote de 5 unidades com a distribuidora autorizada.',
-      dueDate: format(addDays(now, 1), 'yyyy-MM-dd'),
-      dueTime: '10:00',
-      priority: 'high',
-      status: 'pending',
-      assignedToUserName: 'Gerente Operações',
-      createdAt: now.toISOString(),
-    },
-    {
-      id: 'task_3',
-      title: 'Emitir Nota Fiscal e Recibo do Lucas Martins',
-      description: 'Lançamento de entrada já recebido via Pix.',
-      dueDate: format(now, 'yyyy-MM-dd'),
-      dueTime: '17:00',
-      priority: 'medium',
-      status: 'pending',
-      assignedToUserName: 'Financeiro',
-      clientId: 'cli_lucas',
-      clientName: 'Lucas Oliveira Martins',
-      createdAt: now.toISOString(),
-    },
-    {
-      id: 'task_4',
-      title: 'Ligar para Mariana Souza - Cobrança amigável',
-      description: 'Verificar se recebeu o código de barras atualizado.',
-      dueDate: format(subDays(now, 1), 'yyyy-MM-dd'), // Overdue badge!
-      dueTime: '11:00',
-      priority: 'high',
-      status: 'pending',
-      assignedToUserName: 'Financeiro',
-      clientId: 'cli_mariana',
-      clientName: 'Mariana Souza Alcantara',
-      createdAt: subDays(now, 2).toISOString(),
-    },
+    { id: 'task_demo_1', title: 'Reunião com Distribuidora del Este', description: 'Apresentar proposta de renovação.', dueDate: d(addDays(now, 2)), dueTime: '14:30', priority: 'high', status: 'pending', assignedToUserName: 'Vendas', clientId: 'cli_demo_1', clientName: clients[0].name, dealId: 'deal_demo_1', dealTitle: deals[0].title, createdAt: now.toISOString() },
+    { id: 'task_demo_2', title: 'Repor estoque de monitores', description: 'Estoque abaixo do mínimo.', dueDate: d(addDays(now, 1)), dueTime: '10:00', priority: 'high', status: 'pending', assignedToUserName: 'Compras', createdAt: now.toISOString() },
+    { id: 'task_demo_3', title: 'Cobrar parcela atrasada da María José', dueDate: d(subDays(now, 1)), dueTime: '11:00', priority: 'medium', status: 'pending', assignedToUserName: 'Financeiro', clientId: 'cli_demo_3', clientName: clients[2].name, createdAt: subDays(now, 2).toISOString() },
   ];
-  for (const task of tasks) {
-    batch.set(doc(db, 'tasks', task.id), task);
-  }
+  tasks.forEach((t) => put('tasks', t as any));
 
-  await batch.commit();
-
-  await FirestoreService.logAudit(
-    'create',
-    'system',
-    'demo_data',
-    'Conjunto completo de dados de demonstração carregado com sucesso',
-    user
-  );
+  await backend.batch(ops);
+  await FirestoreService.logAudit('create', 'system', 'demo_data', 'Dados de demonstração carregados', user);
 }
 
-export async function clearDemoData(user?: { uid: string; name: string }): Promise<void> {
-  if (!db) throw new Error('Firebase não está conectado.');
-
-  const collectionsToClear = [
-    'clients',
-    'suppliers',
-    'products',
-    'deals',
-    'deal_interactions',
-    'transactions',
-    'tasks',
-    'proposals',
-    'transfers',
-  ];
-
-  for (const colName of collectionsToClear) {
-    try {
-      const snap = await getDocs(collection(db, colName));
-      const batch = writeBatch(db);
-      snap.docs.forEach((d) => batch.delete(d.ref));
-      await batch.commit();
-    } catch (e) {
-      console.error(`Error clearing ${colName}:`, e);
-    }
+/** Apaga somente os registros marcados como demonstração */
+export async function clearDemoData(user?: Actor): Promise<number> {
+  const ops: WriteOp[] = [];
+  for (const col of DEMO_COLLECTIONS) {
+    const items = await backend.getAll<any>(col);
+    items.filter((i) => i.isDemo).forEach((i) => ops.push({ type: 'delete', col, id: i.id }));
   }
-
-  await FirestoreService.logAudit(
-    'delete',
-    'system',
-    'demo_data',
-    'Dados de demonstração removidos do banco de dados',
-    user
-  );
+  if (ops.length) await backend.batch(ops);
+  await FirestoreService.logAudit('delete', 'system', 'demo_data', `Dados de demonstração removidos (${ops.length})`, user);
+  return ops.length;
 }

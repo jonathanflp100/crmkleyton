@@ -7,6 +7,7 @@ import {
   PointerSensor,
   useSensor,
   useSensors,
+  useDroppable,
   type DragStartEvent,
   type DragEndEvent,
 } from '@dnd-kit/core';
@@ -36,31 +37,49 @@ import {
   ExternalLink,
   Edit2,
   Trash2,
+  ArrowRight,
+  CheckSquare,
+  Square,
 } from 'lucide-react';
-import type {
-  Deal,
-  DealInteraction,
-  DealTask,
-  Client,
-  KanbanColumn,
-  DatePeriodFilter,
-} from '../../../types';
-import { formatCurrency, formatDate } from '../../../utils/formatters';
+import type { Deal, DealInteraction, Client, KanbanColumn, Task, Account } from '../../../types';
+import { formatCurrency, formatDate, formatMoneyInput, parseMoney, whatsappLink, PAYMENT_METHODS } from '../../../utils/formatters';
+import { MoneyInput } from '../../common/MoneyInput';
+import { inputCls, labelCls } from '../../common/ui';
 import { Badge } from '../../common/Badge';
 import { Modal } from '../../common/Modal';
 import { ConfirmDialog } from '../../common/ConfirmDialog';
 import { FirestoreService } from '../../../services/firestoreService';
 import { useAuth } from '../../../hooks/useAuth';
 import { useToast } from '../../../hooks/useToast';
-import { KANBAN_STAGES } from '../../../services/demoDataService';
 import { format } from 'date-fns';
 
 interface CrmViewProps {
   deals: Deal[];
   clients: Client[];
   interactions: DealInteraction[];
+  tasks: Task[];
+  accounts: Account[];
+  stages: KanbanColumn[];
   openCreateDeal?: boolean;
   onClearQuickAction?: () => void;
+}
+
+const INTERACTION_LABELS: Record<DealInteraction['type'], string> = {
+  whatsapp: 'WhatsApp',
+  call: 'Ligação',
+  meeting: 'Reunião',
+  email: 'E-mail',
+  note: 'Nota interna',
+};
+
+/** Coluna que aceita cards soltos (inclusive quando está vazia) */
+function DroppableColumn({ id, children, className }: { id: string; children: React.ReactNode; className: string }) {
+  const { setNodeRef, isOver } = useDroppable({ id });
+  return (
+    <div ref={setNodeRef} className={`${className} ${isOver ? 'ring-2 ring-blue-400 ring-offset-1 dark:ring-offset-slate-950' : ''}`}>
+      {children}
+    </div>
+  );
 }
 
 // Single Kanban Card Component
@@ -152,13 +171,16 @@ export function CrmView({
   deals,
   clients,
   interactions,
+  tasks,
+  accounts,
+  stages,
   openCreateDeal = false,
   onClearQuickAction,
 }: CrmViewProps) {
   const { profile, isAdmin } = useAuth();
   const { success, error } = useToast();
-
-  const [stages] = useState<KanbanColumn[]>(KANBAN_STAGES);
+  const wonStage = stages.find((s) => s.isWon) || stages[stages.length - 2];
+  const lostStage = stages.find((s) => s.isLost) || stages[stages.length - 1];
   const [activeDeal, setActiveDeal] = useState<Deal | null>(null);
   const [selectedDealForModal, setSelectedDealForModal] = useState<Deal | null>(null);
 
@@ -167,7 +189,7 @@ export function CrmView({
   const [filterAssignee, setFilterAssignee] = useState('all');
 
   // New / Edit Deal Modal
-  const [isDealModalOpen, setIsDealModalOpen] = useState(openCreateDeal);
+  const [isDealModalOpen, setIsDealModalOpen] = useState(false);
   const [editingDeal, setEditingDeal] = useState<Deal | null>(null);
   const [dealTitle, setDealTitle] = useState('');
   const [dealClientId, setDealClientId] = useState('');
@@ -182,6 +204,14 @@ export function CrmView({
   // Move to Won (Income creation prompt)
   const [wonDealCandidate, setWonDealCandidate] = useState<Deal | null>(null);
   const [createIncomeFromWon, setCreateIncomeFromWon] = useState(true);
+  const [wonAccountId, setWonAccountId] = useState('');
+  const [wonDueDate, setWonDueDate] = useState(format(new Date(), 'yyyy-MM-dd'));
+  const [wonReceivedNow, setWonReceivedNow] = useState(false);
+  const [wonPaymentMethod, setWonPaymentMethod] = useState<string>('bank_transfer');
+
+  // Tarefa rápida dentro do negócio
+  const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [newTaskDate, setNewTaskDate] = useState(format(new Date(), 'yyyy-MM-dd'));
 
   // Move to Lost (Reason prompt)
   const [lostDealCandidate, setLostDealCandidate] = useState<Deal | null>(null);
@@ -246,32 +276,40 @@ export function CrmView({
       if (targetCard) targetStageId = targetCard.stageId;
     }
 
-    if (deal.stageId === targetStageId) return;
+    await moveDeal(deal, targetStageId);
+  };
 
-    // Check if moving to Won
-    if (targetStageId === 'ganho') {
+  /** Move o negócio de etapa (usado no arrastar e no botão "Mover para") */
+  const moveDeal = async (deal: Deal, targetStageId: string) => {
+    if (deal.stageId === targetStageId) return;
+    const dealId = deal.id;
+
+    if (targetStageId === wonStage?.id) {
       confetti({ particleCount: 80, spread: 60, origin: { y: 0.6 } });
-      setWonDealCandidate({ ...deal, stageId: 'ganho' });
+      setWonAccountId(accounts.find((a) => a.isDefault)?.id || accounts[0]?.id || '');
+      setWonDueDate(format(new Date(), 'yyyy-MM-dd'));
+      setWonReceivedNow(false);
+      setCreateIncomeFromWon(true);
+      setWonDealCandidate({ ...deal, stageId: targetStageId });
       return;
     }
 
-    // Check if moving to Lost
-    if (targetStageId === 'perdido') {
-      setLostDealCandidate({ ...deal, stageId: 'perdido' });
+    if (targetStageId === lostStage?.id) {
+      setLostDealCandidate({ ...deal, stageId: targetStageId });
       setLossReasonText('');
       return;
     }
 
-    // Normal stage move
     try {
       const stageObj = stages.find((s) => s.id === targetStageId);
       await FirestoreService.updateDocument<Deal>(
         'deals',
         dealId,
-        { stageId: targetStageId, stageName: stageObj?.title },
+        { stageId: targetStageId, stageName: stageObj?.title, wonDate: undefined, lostDate: undefined },
         profile ? { uid: profile.uid, name: profile.name } : undefined
       );
       success(`Negócio movido para "${stageObj?.title}".`);
+      setSelectedDealForModal((cur) => (cur && cur.id === dealId ? { ...cur, stageId: targetStageId, stageName: stageObj?.title } : cur));
     } catch (err: any) {
       error('Erro ao mover negócio', err?.message);
     }
@@ -285,8 +323,8 @@ export function CrmView({
         'deals',
         wonDealCandidate.id,
         {
-          stageId: 'ganho',
-          stageName: 'Fechado / Ganho',
+          stageId: wonStage.id,
+          stageName: wonStage.title,
           wonDate: format(new Date(), 'yyyy-MM-dd'),
         },
         profile ? { uid: profile.uid, name: profile.name } : undefined
@@ -296,28 +334,31 @@ export function CrmView({
       if (createIncomeFromWon) {
         await FirestoreService.createTransactionWithInstallments(
           {
-            description: `Receita - Negócio Ganho: ${wonDealCandidate.title}`,
+            description: `Negócio fechado: ${wonDealCandidate.title}`,
             amount: wonDealCandidate.value,
             type: 'income',
             date: format(new Date(), 'yyyy-MM-dd'),
-            dueDate: format(new Date(), 'yyyy-MM-dd'),
+            dueDate: wonReceivedNow ? format(new Date(), 'yyyy-MM-dd') : wonDueDate,
+            paymentDate: wonReceivedNow ? format(new Date(), 'yyyy-MM-dd') : undefined,
             categoryId: 'cat_vendas',
-            categoryName: 'Vendas',
-            paymentMethod: 'pix',
-            status: 'pending',
+            categoryName: 'Vendas de Produtos',
+            paymentMethod: wonPaymentMethod as any,
+            status: wonReceivedNow ? 'paid' : 'pending',
             entityType: 'client',
             entityId: wonDealCandidate.clientId,
             entityName: wonDealCandidate.clientName,
-            accountId: 'acc_itau',
+            accountId: wonAccountId,
+            accountName: accounts.find((a) => a.id === wonAccountId)?.name,
             dealId: wonDealCandidate.id,
           },
           profile ? { uid: profile.uid, name: profile.name } : undefined
         );
-        success('Negócio ganho e conta a receber gerada no Financeiro!');
+        success(wonReceivedNow ? 'Negócio ganho e recebimento lançado no Financeiro!' : 'Negócio ganho e conta a receber gerada no Financeiro!');
       } else {
         success('Negócio marcado como Ganho!');
       }
       setWonDealCandidate(null);
+      setSelectedDealForModal(null);
     } catch (err: any) {
       error('Erro ao finalizar negócio', err?.message);
     }
@@ -331,15 +372,16 @@ export function CrmView({
         'deals',
         lostDealCandidate.id,
         {
-          stageId: 'perdido',
-          stageName: 'Perdido',
+          stageId: lostStage.id,
+          stageName: lostStage.title,
           lostDate: format(new Date(), 'yyyy-MM-dd'),
           lossReason: lossReasonText || 'Não informado',
         },
         profile ? { uid: profile.uid, name: profile.name } : undefined
       );
-      success('Negócio atualizado para Perdido.');
+      success('Negócio marcado como perdido.');
       setLostDealCandidate(null);
+      setSelectedDealForModal(null);
     } catch (err: any) {
       error('Erro ao atualizar negócio', err?.message);
     }
@@ -351,7 +393,7 @@ export function CrmView({
     setDealTitle('');
     setDealClientId(clients[0]?.id || '');
     setDealValue('');
-    setDealStageId('novo');
+    setDealStageId(stages[0]?.id || 'novo');
     setDealPriority('medium');
     setDealExpectedDate(format(new Date(), 'yyyy-MM-dd'));
     setDealAssignee(profile?.name || 'Comercial');
@@ -360,11 +402,34 @@ export function CrmView({
     setIsDealModalOpen(true);
   };
 
+  const openEditDealModal = (d: Deal) => {
+    setEditingDeal(d);
+    setDealTitle(d.title);
+    setDealClientId(d.clientId);
+    setDealValue(formatMoneyInput(d.value));
+    setDealStageId(d.stageId);
+    setDealPriority(d.priority || 'medium');
+    setDealExpectedDate(d.expectedCloseDate || format(new Date(), 'yyyy-MM-dd'));
+    setDealAssignee(d.assignedToUserName || '');
+    setDealTags((d.tags || []).join(', '));
+    setDealNotes(d.notes || '');
+    setSelectedDealForModal(null);
+    setIsDealModalOpen(true);
+  };
+
+  React.useEffect(() => {
+    if (openCreateDeal) openNewDealModal();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleSaveDeal = async (e: React.FormEvent) => {
     e.preventDefault();
-    const val = parseFloat(dealValue.replace(',', '.'));
-    if (!dealTitle || isNaN(val)) {
-      error('Preencha o título e um valor válido.');
+    const val = parseMoney(dealValue);
+    if (!dealTitle.trim()) {
+      error('Preencha o título do negócio.');
+      return;
+    }
+    if (!dealClientId) {
+      error('Selecione o cliente. Se ainda não tiver, cadastre em Clientes.');
       return;
     }
 
@@ -453,16 +518,49 @@ export function CrmView({
 
   const handleOpenWhatsApp = (deal: Deal, e: React.MouseEvent) => {
     e.stopPropagation();
-    const phone = deal.clientPhone?.replace(/\D/g, '');
-    if (!phone) {
-      error('Este cliente não possui telefone/WhatsApp cadastrado.');
+    const client = clients.find((c) => c.id === deal.clientId);
+    const link = whatsappLink(client?.whatsapp || client?.phone || deal.clientPhone, `Olá ${deal.clientName}, tudo bem? Gostaria de falar sobre "${deal.title}".`);
+    if (!link) {
+      error('Este cliente não tem telefone/WhatsApp cadastrado.');
       return;
     }
-    const cleanPhone = phone.startsWith('55') ? phone : `55${phone}`;
-    const text = encodeURIComponent(
-      `Olá ${deal.clientName}, tudo bem? Sou da equipe da Gestor Pro e gostaria de falar sobre "${deal.title}".`
-    );
-    window.open(`https://wa.me/${cleanPhone}?text=${text}`, '_blank');
+    window.open(link, '_blank');
+  };
+
+  const dealTasks = useMemo(
+    () => (selectedDealForModal ? tasks.filter((t) => t.dealId === selectedDealForModal.id).sort((a, b) => a.dueDate.localeCompare(b.dueDate)) : []),
+    [tasks, selectedDealForModal]
+  );
+
+  const handleAddDealTask = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedDealForModal || !newTaskTitle.trim()) return;
+    try {
+      await FirestoreService.createDocument(
+        'tasks',
+        {
+          title: newTaskTitle.trim(),
+          dueDate: newTaskDate,
+          priority: 'medium',
+          status: 'pending',
+          assignedToUserName: profile?.name,
+          clientId: selectedDealForModal.clientId,
+          clientName: selectedDealForModal.clientName,
+          dealId: selectedDealForModal.id,
+          dealTitle: selectedDealForModal.title,
+        } as any,
+        profile ? { uid: profile.uid, name: profile.name } : undefined
+      );
+      setNewTaskTitle('');
+      success('Tarefa criada!');
+    } catch (err: any) {
+      error('Erro ao criar tarefa', err?.message);
+    }
+  };
+
+  const toggleTask = async (t: Task) => {
+    const done = t.status !== 'completed';
+    await FirestoreService.updateDocument<Task>('tasks', t.id, { status: done ? 'completed' : 'pending', completedAt: done ? new Date().toISOString() : undefined });
   };
 
   const dealInteractionsList = useMemo(() => {
@@ -526,16 +624,16 @@ export function CrmView({
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
       >
-        <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-5 gap-4 items-start overflow-x-auto pb-4">
+        <div className="flex gap-4 items-start overflow-x-auto pb-4 snap-x">
           {stages.map((stage) => {
             const stageDeals = filteredDeals.filter((d) => d.stageId === stage.id);
             const totalValue = stageDeals.reduce((sum, d) => sum + (d.value || 0), 0);
 
             return (
-              <div
+              <DroppableColumn
                 key={stage.id}
                 id={stage.id}
-                className="w-full min-w-[260px] bg-slate-100/80 dark:bg-slate-900/50 rounded-2xl p-3 border border-slate-200/80 dark:border-slate-800 flex flex-col max-h-[82vh]"
+                className="w-[260px] shrink-0 2xl:shrink 2xl:flex-1 2xl:min-w-[210px] snap-start bg-slate-100/80 dark:bg-slate-900/50 rounded-2xl p-3 border border-slate-200/80 dark:border-slate-800 flex flex-col max-h-[78vh] transition-shadow"
               >
                 {/* Column Header */}
                 <div className="flex items-center justify-between pb-3 mb-2 border-b border-slate-200 dark:border-slate-800">
@@ -582,7 +680,7 @@ export function CrmView({
                     )}
                   </div>
                 </SortableContext>
-              </div>
+              </DroppableColumn>
             );
           })}
         </div>
@@ -648,30 +746,23 @@ export function CrmView({
 
             <div className="space-y-1">
               <label className="font-semibold text-slate-700 dark:text-slate-300">
-                Valor Previsto (R$) *
+                Valor previsto
               </label>
-              <input
-                type="text"
-                required
-                placeholder="0,00"
-                value={dealValue}
-                onChange={(e) => setDealValue(e.target.value)}
-                className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 font-mono font-bold text-slate-900 dark:text-slate-100"
-              />
+              <MoneyInput value={dealValue} onChange={setDealValue} className={`${inputCls} font-mono font-bold`} />
             </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="space-y-1">
               <label className="font-semibold text-slate-700 dark:text-slate-300">
-                Etapa Inicial
+                Etapa
               </label>
               <select
                 value={dealStageId}
                 onChange={(e) => setDealStageId(e.target.value)}
                 className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
               >
-                {stages.map((s) => (
+                {stages.filter((s) => !s.isWon && !s.isLost || s.id === dealStageId).map((s) => (
                   <option key={s.id} value={s.id}>
                     {s.title}
                   </option>
@@ -794,7 +885,7 @@ export function CrmView({
                       : 'neutral'
                   }
                 >
-                  Prioridade {selectedDealForModal.priority?.toUpperCase()}
+                  Prioridade {selectedDealForModal.priority === 'high' ? 'alta' : selectedDealForModal.priority === 'low' ? 'baixa' : 'média'}
                 </Badge>
               </div>
 
@@ -809,6 +900,56 @@ export function CrmView({
               )}
             </div>
 
+            {/* Mover de etapa (útil no celular, onde arrastar é difícil) */}
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-semibold text-slate-600 dark:text-slate-300 flex items-center gap-1">
+                <ArrowRight className="w-3.5 h-3.5" /> Mover para:
+              </span>
+              {stages.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  disabled={s.id === selectedDealForModal.stageId}
+                  onClick={() => moveDeal(selectedDealForModal, s.id)}
+                  className={`px-2.5 py-1 rounded-lg border text-[11px] font-semibold transition-colors ${
+                    s.id === selectedDealForModal.stageId
+                      ? 'bg-slate-900 text-white border-slate-900 dark:bg-white dark:text-slate-900'
+                      : 'border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  <span className="inline-block w-2 h-2 rounded-full mr-1" style={{ backgroundColor: s.color }} />
+                  {s.title}
+                </button>
+              ))}
+            </div>
+
+            {(selectedDealForModal.notes || selectedDealForModal.lossReason) && (
+              <div className="p-3 rounded-xl bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200/60 dark:border-amber-900/40 text-slate-700 dark:text-slate-300 space-y-1">
+                {selectedDealForModal.notes && <p className="whitespace-pre-wrap">{selectedDealForModal.notes}</p>}
+                {selectedDealForModal.lossReason && <p><strong>Motivo da perda:</strong> {selectedDealForModal.lossReason}</p>}
+              </div>
+            )}
+
+            {/* Tarefas do negócio */}
+            <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-700 space-y-2.5">
+              <h4 className="font-bold text-slate-800 dark:text-slate-200 flex items-center gap-2">
+                <CheckSquare className="w-4 h-4 text-purple-500" />
+                Tarefas deste negócio ({dealTasks.length})
+              </h4>
+              <form onSubmit={handleAddDealTask} className="flex flex-wrap items-center gap-2">
+                <input type="text" required placeholder="Ex.: Ligar para confirmar o pedido" value={newTaskTitle} onChange={(e) => setNewTaskTitle(e.target.value)} className={`${inputCls} flex-1 min-w-[180px] !py-1.5`} />
+                <input type="date" value={newTaskDate} onChange={(e) => setNewTaskDate(e.target.value)} className={`${inputCls} !w-auto !py-1.5`} />
+                <button type="submit" className="px-4 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-700 text-white font-semibold">Adicionar</button>
+              </form>
+              {dealTasks.map((t) => (
+                <button key={t.id} type="button" onClick={() => toggleTask(t)} className="w-full flex items-center gap-2 text-left p-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/60">
+                  {t.status === 'completed' ? <CheckSquare className="w-4 h-4 text-emerald-600" /> : <Square className="w-4 h-4 text-slate-400" />}
+                  <span className={`flex-1 ${t.status === 'completed' ? 'line-through text-slate-400' : 'text-slate-700 dark:text-slate-200'}`}>{t.title}</span>
+                  <span className={`text-[10px] ${t.status !== 'completed' && t.dueDate < format(new Date(), 'yyyy-MM-dd') ? 'text-rose-600 font-bold' : 'text-slate-400'}`}>{formatDate(t.dueDate)}</span>
+                </button>
+              ))}
+            </div>
+
             {/* Interaction recording form */}
             <form onSubmit={handleAddInteraction} className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-700 space-y-2.5">
               <h4 className="font-bold text-slate-800 dark:text-slate-200 flex items-center gap-2">
@@ -816,7 +957,7 @@ export function CrmView({
                 Registrar Nova Interação no Histórico
               </h4>
 
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <select
                   value={interactionType}
                   onChange={(e) => setInteractionType(e.target.value as any)}
@@ -835,7 +976,7 @@ export function CrmView({
                   placeholder="Descreva o que foi conversado ou alinhado..."
                   value={interactionDesc}
                   onChange={(e) => setInteractionDesc(e.target.value)}
-                  className="flex-1 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
+                  className="flex-1 min-w-[180px] px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
                 />
 
                 <button
@@ -871,7 +1012,7 @@ export function CrmView({
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center justify-between">
                           <span className="font-semibold text-slate-800 dark:text-slate-200 capitalize">
-                            {item.type} • {item.userName}
+                            {INTERACTION_LABELS[item.type] || item.type} • {item.userName}
                           </span>
                           <span className="text-[10px] text-slate-400">
                             {formatDate(item.createdAt)}
@@ -906,13 +1047,22 @@ export function CrmView({
                   Excluir Negócio
                 </button>
               )}
-              <button
-                type="button"
-                onClick={() => setSelectedDealForModal(null)}
-                className="ml-auto px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 font-medium"
-              >
-                Fechar
-              </button>
+              <div className="ml-auto flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => openEditDealModal(selectedDealForModal)}
+                  className="px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 font-medium flex items-center gap-1.5"
+                >
+                  <Edit2 className="w-3.5 h-3.5" /> Editar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedDealForModal(null)}
+                  className="px-4 py-2 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 font-medium"
+                >
+                  Fechar
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -951,11 +1101,41 @@ export function CrmView({
                 Gerar lançamento de receita no Financeiro
               </span>
               <p className="text-[11px] text-slate-500 mt-0.5">
-                Cria automaticamente uma conta a receber no valor de{' '}
-                {formatCurrency(wonDealCandidate?.value)}.
+                Lança {formatCurrency(wonDealCandidate?.value)} no Financeiro, vinculado ao cliente.
               </p>
             </div>
           </label>
+
+          {createIncomeFromWon && (
+            <div className="grid grid-cols-2 gap-3">
+              <label className="col-span-2 flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" checked={wonReceivedNow} onChange={(e) => setWonReceivedNow(e.target.checked)} />
+                <span className="font-semibold text-slate-700 dark:text-slate-300">Já recebi o pagamento</span>
+              </label>
+              {!wonReceivedNow && (
+                <div className="space-y-1">
+                  <label className={labelCls}>Vencimento</label>
+                  <input type="date" value={wonDueDate} onChange={(e) => setWonDueDate(e.target.value)} className={inputCls} />
+                </div>
+              )}
+              <div className="space-y-1">
+                <label className={labelCls}>Conta / caixa</label>
+                <select value={wonAccountId} onChange={(e) => setWonAccountId(e.target.value)} className={inputCls}>
+                  {accounts.map((a) => (
+                    <option key={a.id} value={a.id}>{a.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-1 col-span-2 sm:col-span-1">
+                <label className={labelCls}>Forma de pagamento</label>
+                <select value={wonPaymentMethod} onChange={(e) => setWonPaymentMethod(e.target.value)} className={inputCls}>
+                  {PAYMENT_METHODS.map((p) => (
+                    <option key={p.value} value={p.value}>{p.label}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          )}
 
           <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-200 dark:border-slate-700">
             <button
@@ -997,7 +1177,7 @@ export function CrmView({
               <option value="Fechou com concorrente">Fechou com concorrente</option>
               <option value="Decidiu adiar o projeto">Decidiu adiar o projeto</option>
               <option value="Cliente não respondeu / Desistiu">Cliente não respondeu / Desistiu</option>
-              <option value="Falta de funcionalidade específica">Falta de funcionalidade específica</option>
+              <option value="Não tinha o produto / prazo de entrega">Não tinha o produto / prazo de entrega</option>
               <option value="Outro motivo">Outro motivo</option>
             </select>
           </div>

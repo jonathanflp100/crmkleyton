@@ -1,8 +1,8 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { auth, db, isFirebaseConfigured } from '../services/firebase';
+import { auth, isFirebaseConfigured } from '../services/firebase';
 import { AuthService } from '../services/authService';
+import { backend } from '../services/backend';
 import type { UserProfile, UserRole } from '../types';
 
 interface AuthContextType {
@@ -12,7 +12,8 @@ interface AuthContextType {
   isEmployee: boolean;
   loading: boolean;
   isConfigured: boolean;
-  login: (email: string, pass: string) => Promise<void>;
+  authMessage: string | null;
+  login: (email: string, pass: string, demoRole?: UserRole) => Promise<void>;
   logout: () => Promise<void>;
   resetPassword: (email: string) => Promise<void>;
   switchDemoRole?: (role: UserRole) => void;
@@ -20,78 +21,79 @@ interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+const DEMO_SESSION_KEY = 'gestorpro_demo_session';
+
+function demoProfile(role: UserRole, email?: string): UserProfile {
+  return {
+    uid: role === 'admin' ? 'demo_admin' : 'demo_employee',
+    email: email || (role === 'admin' ? 'admin@demo.local' : 'funcionario@demo.local'),
+    name: role === 'admin' ? 'Administrador (Demo)' : 'Funcionário (Demo)',
+    role,
+    active: true,
+    createdAt: new Date().toISOString(),
+  };
+}
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
-  const [demoRole, setDemoRole] = useState<UserRole>('admin');
+  const [authMessage, setAuthMessage] = useState<string | null>(null);
   const configured = isFirebaseConfigured();
 
   useEffect(() => {
     if (!configured || !auth) {
-      // In demo / unconfigured mode: provide default admin profile
-      setProfile({
-        uid: 'demo_admin_uid',
-        email: 'admin@gestorpro.com.br',
-        name: 'Administrador (Demo)',
-        role: demoRole,
-        active: true,
-        createdAt: new Date().toISOString(),
-      });
+      // Modo de teste local: mantém a sessão enquanto a aba estiver aberta
+      try {
+        const saved = sessionStorage.getItem(DEMO_SESSION_KEY);
+        if (saved) setProfile(JSON.parse(saved));
+      } catch {
+        /* ignore */
+      }
       setLoading(false);
       return;
     }
 
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       setUser(firebaseUser);
-      if (firebaseUser && db) {
-        try {
-          const userDocRef = doc(db, 'users', firebaseUser.uid);
-          const snap = await getDoc(userDocRef);
-
-          if (snap.exists()) {
-            const data = snap.data() as UserProfile;
-            setProfile(data);
-          } else {
-            // Bootstrap initial user profile
-            const isFirstAdmin =
-              firebaseUser.email?.toLowerCase().includes('admin') ||
-              firebaseUser.email === 'jonathanflp100@gmail.com';
-            const initialProfile: UserProfile = {
-              uid: firebaseUser.uid,
-              email: firebaseUser.email || '',
-              name: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'Usuário',
-              role: isFirstAdmin ? 'admin' : 'employee',
-              active: true,
-              createdAt: new Date().toISOString(),
-            };
-            await setDoc(userDocRef, initialProfile);
-            setProfile(initialProfile);
-          }
-        } catch (err) {
-          console.error('Error fetching user profile from Firestore:', err);
+      if (!firebaseUser) {
+        setProfile(null);
+        setLoading(false);
+        return;
+      }
+      try {
+        if (AuthService.pendingSetup) await AuthService.pendingSetup.catch(() => undefined);
+        const data = await backend.get<UserProfile>('users', firebaseUser.uid);
+        if (!data) {
+          setAuthMessage('Sua conta ainda não foi liberada. Peça ao administrador para cadastrar seu acesso.');
+          await AuthService.logout();
+          setProfile(null);
+        } else if (data.active === false) {
+          setAuthMessage('Seu acesso foi desativado pelo administrador.');
+          await AuthService.logout();
+          setProfile(null);
+        } else {
+          setAuthMessage(null);
+          setProfile({ ...data, uid: firebaseUser.uid });
         }
-      } else {
+      } catch (err) {
+        console.error('Erro ao carregar o perfil do usuário:', err);
+        setAuthMessage('Não foi possível carregar seu perfil. Verifique as regras do Firestore.');
+        await AuthService.logout();
         setProfile(null);
       }
       setLoading(false);
     });
 
     return () => unsubscribe();
-  }, [configured, demoRole]);
+  }, [configured]);
 
-  const login = async (email: string, pass: string) => {
+  const login = async (email: string, pass: string, demoRole: UserRole = 'admin') => {
+    setAuthMessage(null);
     if (!configured) {
-      // Demo simulated login
-      setProfile({
-        uid: 'demo_uid',
-        email,
-        name: email.split('@')[0],
-        role: email.includes('admin') ? 'admin' : 'employee',
-        active: true,
-        createdAt: new Date().toISOString(),
-      });
+      const p = demoProfile(demoRole, email || undefined);
+      sessionStorage.setItem(DEMO_SESSION_KEY, JSON.stringify(p));
+      setProfile(p);
       return;
     }
     await AuthService.login(email, pass);
@@ -99,8 +101,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const logout = async () => {
     if (!configured) {
+      sessionStorage.removeItem(DEMO_SESSION_KEY);
       setProfile(null);
-      setUser(null);
       return;
     }
     await AuthService.logout();
@@ -114,28 +116,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const switchDemoRole = (role: UserRole) => {
-    setDemoRole(role);
-    if (profile) {
-      setProfile({
-        ...profile,
-        role,
-        name: role === 'admin' ? 'Administrador (Demo)' : 'Funcionário Operacional (Demo)',
-      });
-    }
+    if (configured) return;
+    const p = demoProfile(role);
+    sessionStorage.setItem(DEMO_SESSION_KEY, JSON.stringify(p));
+    setProfile(p);
   };
-
-  const isAdmin = profile?.role === 'admin';
-  const isEmployee = profile?.role === 'employee';
 
   return (
     <AuthContext.Provider
       value={{
         user,
         profile,
-        isAdmin,
-        isEmployee,
+        isAdmin: profile?.role === 'admin',
+        isEmployee: profile?.role === 'employee',
         loading,
         isConfigured: configured,
+        authMessage,
         login,
         logout,
         resetPassword,
@@ -150,8 +146,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
 export function useAuth() {
   const context = useContext(AuthContext);
-  if (!context) {
-    throw new Error('useAuth must be used within AuthProvider');
-  }
+  if (!context) throw new Error('useAuth must be used within AuthProvider');
   return context;
+}
+
+/** Atalho para a auditoria */
+export function useActor() {
+  const { profile } = useAuth();
+  return profile ? { uid: profile.uid, name: profile.name } : undefined;
 }

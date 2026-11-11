@@ -20,7 +20,7 @@ export interface UserProfile {
 export interface CompanyProfile {
   name: string;
   tradingName?: string;
-  document: string; // CNPJ
+  document: string; // RUC
   email: string;
   phone: string;
   whatsapp?: string;
@@ -44,7 +44,7 @@ export interface Client {
   id: string;
   type: PersonType;
   name: string;
-  document: string; // CPF or CNPJ
+  document: string; // CI ou RUC
   phone?: string;
   whatsapp?: string;
   email?: string;
@@ -82,7 +82,7 @@ export interface Supplier {
   state?: string;
   contactPerson?: string;
   bankInfo?: string;
-  pixKey?: string;
+  pixKey?: string; // legado
   notes?: string;
   tags?: string[];
   createdAt: string;
@@ -94,14 +94,18 @@ export interface Supplier {
 export type TransactionType = 'income' | 'expense';
 export type TransactionStatus = 'paid' | 'pending' | 'overdue';
 
-export type PaymentMethod = 
-  | 'pix' 
-  | 'cash' 
-  | 'credit_card' 
-  | 'debit_card' 
-  | 'bank_slip' 
+export type PaymentMethod =
+  | 'cash'
   | 'bank_transfer'
-  | 'other';
+  | 'debit_card'
+  | 'credit_card'
+  | 'qr'
+  | 'wallet'
+  | 'check'
+  | 'other'
+  // legados (dados antigos)
+  | 'pix'
+  | 'bank_slip';
 
 export interface Transaction {
   id: string;
@@ -319,4 +323,15 @@ export interface KanbanColumn {
   isLost?: boolean;
 }
 
-export type DatePeriodFilter = 'today' | 'week' | 'month' | 'year' | 'custom';
+export type DatePeriodFilter = 'today' | 'week' | 'month' | 'last_month' | 'year' | 'custom';
+
+export interface DateRange {
+  start: string; // yyyy-MM-dd
+  end: string; // yyyy-MM-dd
+}
+
+/** Usuário que executa a ação (para auditoria) */
+export interface Actor {
+  uid: string;
+  name: string;
+}

@@ -37,6 +37,7 @@ interface SidebarProps {
   onSelectModule: (module: AppModule) => void;
   overdueTasksCount?: number;
   companyName?: string;
+  logoUrl?: string;
   isOpenMobile?: boolean;
   onCloseMobile?: () => void;
 }
@@ -46,6 +47,7 @@ export function Sidebar({
   onSelectModule,
   overdueTasksCount = 0,
   companyName = 'Gestor Pro',
+  logoUrl,
   isOpenMobile = false,
   onCloseMobile,
 }: SidebarProps) {
@@ -95,9 +97,13 @@ export function Sidebar({
         {/* Brand / Logo */}
         <div className="h-16 px-5 flex items-center justify-between border-b border-slate-800/80 bg-slate-950/40">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center shadow-lg shadow-blue-500/20 text-white font-black text-lg tracking-wider">
-              GP
-            </div>
+            {logoUrl ? (
+              <img src={logoUrl} alt="" className="w-9 h-9 rounded-xl object-contain bg-white p-0.5" />
+            ) : (
+              <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center shadow-lg shadow-blue-500/20 text-white font-black text-lg tracking-wider">
+                GP
+              </div>
+            )}
             <div className="leading-tight">
               <span className="font-bold text-base text-white tracking-tight flex items-center gap-1.5">
                 Gestor Pro

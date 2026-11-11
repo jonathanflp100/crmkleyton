@@ -12,6 +12,7 @@ interface ConfirmDialogProps {
   cancelText?: string;
   variant?: 'danger' | 'warning' | 'primary';
   loading?: boolean;
+  children?: React.ReactNode;
 }
 
 export function ConfirmDialog({
@@ -20,10 +21,11 @@ export function ConfirmDialog({
   onConfirm,
   title,
   message,
-  confirmText = 'Confirmar Exclusão',
+  confirmText = 'Confirmar exclusão',
   cancelText = 'Cancelar',
   variant = 'danger',
   loading = false,
+  children,
 }: ConfirmDialogProps) {
   const buttonColors = {
     danger: 'bg-rose-600 hover:bg-rose-700 text-white shadow-rose-600/20',
@@ -46,9 +48,11 @@ export function ConfirmDialog({
           <AlertTriangle className="w-7 h-7" />
         </div>
 
-        <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed mb-6">
+        <p className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed">
           {message}
         </p>
+        {children}
+        <div className="mb-6" />
 
         <div className="flex items-center gap-3 w-full">
           <button

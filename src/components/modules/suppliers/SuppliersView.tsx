@@ -13,13 +13,15 @@ import {
   Edit2,
   Building,
 } from 'lucide-react';
-import type { Supplier, Transaction } from '../../../types';
+import type { Supplier, Transaction, CompanyProfile } from '../../../types';
 import {
   formatCurrency,
   formatDate,
   formatDocument,
   formatPhone,
-  formatCEP,
+  formatAddress,
+  maskDocumentInput,
+  whatsappLink,
 } from '../../../utils/formatters';
 import { Badge } from '../../common/Badge';
 import { Modal } from '../../common/Modal';
@@ -27,16 +29,18 @@ import { ConfirmDialog } from '../../common/ConfirmDialog';
 import { EmptyState } from '../../common/EmptyState';
 import { Pagination } from '../../common/Pagination';
 import { FirestoreService } from '../../../services/firestoreService';
-import { lookupCep } from '../../../services/viaCepService';
+import { AddressFields } from '../../common/AddressFields';
+import { printSupplierSheet } from '../../../services/printDocuments';
 import { useAuth } from '../../../hooks/useAuth';
 import { useToast } from '../../../hooks/useToast';
 
 interface SuppliersViewProps {
   suppliers: Supplier[];
   transactions: Transaction[];
+  company: CompanyProfile | null;
 }
 
-export function SuppliersView({ suppliers, transactions }: SuppliersViewProps) {
+export function SuppliersView({ suppliers, transactions, company }: SuppliersViewProps) {
   const { profile, isAdmin } = useAuth();
   const { success, error, warning } = useToast();
 
@@ -113,23 +117,6 @@ export function SuppliersView({ suppliers, transactions }: SuppliersViewProps) {
     setFormNotes(s.notes || '');
     setFormTags(s.tags ? s.tags.join(', ') : '');
     setIsModalOpen(true);
-  };
-
-  const handleCepBlur = async () => {
-    if (!formCep) return;
-    const clean = formCep.replace(/\D/g, '');
-    if (clean.length === 8) {
-      const data = await lookupCep(clean);
-      if (data) {
-        setFormStreet(data.logradouro || '');
-        setFormNeighborhood(data.bairro || '');
-        setFormCity(data.localidade || '');
-        setFormState(data.uf || '');
-        success('Endereço preenchido via CEP!');
-      } else {
-        warning('CEP não encontrado.');
-      }
-    }
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -249,7 +236,7 @@ export function SuppliersView({ suppliers, transactions }: SuppliersViewProps) {
           <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
           <input
             type="text"
-            placeholder="Buscar fornecedor por nome, CNPJ ou contato..."
+            placeholder="Buscar fornecedor por nome, RUC ou contato..."
             value={searchTerm}
             onChange={(e) => { setSearchTerm(e.target.value); setCurrentPage(1); }}
             className="w-full pl-9 pr-3 py-1.5 text-xs rounded-xl bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-slate-100"
@@ -306,11 +293,12 @@ export function SuppliersView({ suppliers, transactions }: SuppliersViewProps) {
                       <span className="truncate">{supplier.email}</span>
                     </div>
                   )}
-                  {supplier.pixKey && (
-                    <p className="text-[11px] font-mono text-slate-500 truncate">
-                      Pix: {supplier.pixKey}
-                    </p>
+                  {supplier.whatsapp && (
+                    <a href={whatsappLink(supplier.whatsapp) || '#'} target="_blank" rel="noreferrer" className="text-emerald-600 hover:underline">
+                      WhatsApp: {formatPhone(supplier.whatsapp)}
+                    </a>
                   )}
+
                 </div>
               </div>
 
@@ -364,7 +352,7 @@ export function SuppliersView({ suppliers, transactions }: SuppliersViewProps) {
         isOpen={Boolean(selectedSupplier)}
         onClose={() => setSelectedSupplier(null)}
         title={selectedSupplier?.name || 'Ficha do Fornecedor'}
-        subtitle={`CNPJ/CPF: ${formatDocument(selectedSupplier?.document || '')}`}
+        subtitle={`RUC: ${formatDocument(selectedSupplier?.document || '') || '-'}${selectedSupplier && formatAddress(selectedSupplier) ? ` · ${formatAddress(selectedSupplier)}` : ''}`}
         maxWidth="3xl"
       >
         {selectedSupplier && (
@@ -385,13 +373,13 @@ export function SuppliersView({ suppliers, transactions }: SuppliersViewProps) {
               </div>
             </div>
 
-            {/* Bank / Pix info */}
+            {/* Dados bancários */}
             {(selectedSupplier.bankInfo || selectedSupplier.pixKey) && (
               <div className="p-3.5 rounded-xl bg-blue-50/50 dark:bg-blue-950/30 border border-blue-200 dark:border-blue-900">
                 <span className="font-bold text-blue-900 dark:text-blue-200">Dados Bancários para Pagamento:</span>
                 <p className="mt-1 text-slate-700 dark:text-slate-300">
                   {selectedSupplier.bankInfo && <span>Banco: {selectedSupplier.bankInfo} • </span>}
-                  {selectedSupplier.pixKey && <span>Chave Pix: {selectedSupplier.pixKey}</span>}
+                  {selectedSupplier.pixKey && <span>Outros dados: {selectedSupplier.pixKey}</span>}
                 </p>
               </div>
             )}
@@ -430,7 +418,7 @@ export function SuppliersView({ suppliers, transactions }: SuppliersViewProps) {
 
             <div className="flex items-center justify-between pt-3 border-t border-slate-200 dark:border-slate-700">
               <button
-                onClick={() => window.print()}
+                onClick={() => printSupplierSheet(selectedSupplier, supplierPayments, company)}
                 className="px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-semibold flex items-center gap-2"
               >
                 <Printer className="w-4 h-4" />
@@ -473,13 +461,14 @@ export function SuppliersView({ suppliers, transactions }: SuppliersViewProps) {
 
             <div className="space-y-1">
               <label className="font-semibold text-slate-700 dark:text-slate-300">
-                CNPJ / CPF
+                RUC / CI
               </label>
               <input
                 type="text"
-                placeholder="00.000.000/0000-00"
+                inputMode="numeric"
+                placeholder="80012345-6"
                 value={formDocument}
-                onChange={(e) => setFormDocument(e.target.value)}
+                onChange={(e) => setFormDocument(maskDocumentInput(e.target.value))}
                 className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 font-mono text-slate-900 dark:text-slate-100"
               />
             </div>
@@ -504,8 +493,8 @@ export function SuppliersView({ suppliers, transactions }: SuppliersViewProps) {
                 Telefone
               </label>
               <input
-                type="text"
-                placeholder="(00) 0000-0000"
+                type="tel"
+                placeholder="021 123 456"
                 value={formPhone}
                 onChange={(e) => setFormPhone(e.target.value)}
                 className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
@@ -529,24 +518,24 @@ export function SuppliersView({ suppliers, transactions }: SuppliersViewProps) {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1">
               <label className="font-semibold text-slate-700 dark:text-slate-300">
-                Chave Pix para Pagamento
+                WhatsApp
               </label>
               <input
-                type="text"
-                placeholder="CNPJ, e-mail, telefone ou chave aleatória"
-                value={formPixKey}
-                onChange={(e) => setFormPixKey(e.target.value)}
+                type="tel"
+                placeholder="0981 123 456"
+                value={formWhatsapp}
+                onChange={(e) => setFormWhatsapp(e.target.value)}
                 className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
               />
             </div>
 
             <div className="space-y-1">
               <label className="font-semibold text-slate-700 dark:text-slate-300">
-                Dados Bancários (Banco, Agência, Conta)
+                Dados bancários (banco, conta, titular)
               </label>
               <input
                 type="text"
-                placeholder="Ex: Itaú Ag 1234 C/C 56789-0"
+                placeholder="Ex.: Banco Continental — Cta. 1234567 — RUC 80012345-6"
                 value={formBankInfo}
                 onChange={(e) => setFormBankInfo(e.target.value)}
                 className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
@@ -554,43 +543,27 @@ export function SuppliersView({ suppliers, transactions }: SuppliersViewProps) {
             </div>
           </div>
 
-          {/* Endereço */}
-          <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700 space-y-2.5">
-            <span className="font-bold text-slate-700 dark:text-slate-300">Endereço do Fornecedor</span>
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
-              <div className="space-y-1">
-                <label className="text-slate-500">CEP</label>
-                <input
-                  type="text"
-                  placeholder="00000-000"
-                  value={formCep}
-                  onChange={(e) => setFormCep(e.target.value)}
-                  onBlur={handleCepBlur}
-                  className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-                />
-              </div>
+          <AddressFields
+            title="Endereço do fornecedor"
+            value={{ street: formStreet, number: formNumber, complement: formComplement, neighborhood: formNeighborhood, city: formCity, state: formState }}
+            onChange={(p) => {
+              if (p.street !== undefined) setFormStreet(p.street);
+              if (p.number !== undefined) setFormNumber(p.number);
+              if (p.complement !== undefined) setFormComplement(p.complement);
+              if (p.neighborhood !== undefined) setFormNeighborhood(p.neighborhood);
+              if (p.city !== undefined) setFormCity(p.city);
+              if (p.state !== undefined) setFormState(p.state);
+            }}
+          />
 
-              <div className="sm:col-span-2 space-y-1">
-                <label className="text-slate-500">Rua / Logradouro</label>
-                <input
-                  type="text"
-                  value={formStreet}
-                  onChange={(e) => setFormStreet(e.target.value)}
-                  className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label className="text-slate-500">Cidade / UF</label>
-                <input
-                  type="text"
-                  placeholder="São Paulo/SP"
-                  value={formCity ? `${formCity}/${formState}` : ''}
-                  onChange={(e) => setFormCity(e.target.value)}
-                  className="w-full px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-                />
-              </div>
-            </div>
+          <div className="space-y-1">
+            <label className="font-semibold text-slate-700 dark:text-slate-300">Observações</label>
+            <textarea
+              rows={2}
+              value={formNotes}
+              onChange={(e) => setFormNotes(e.target.value)}
+              className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
+            />
           </div>
 
           <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-200 dark:border-slate-700">
