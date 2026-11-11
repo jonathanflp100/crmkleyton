@@ -1,0 +1,226 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile with role management",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "name": { "type": "string", "maxLength": 100 },
+        "role": { "type": "string", "enum": ["admin", "employee"] },
+        "active": { "type": "boolean" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["uid", "email", "name", "role", "active"]
+    },
+    "Client": {
+      "title": "Client",
+      "description": "Customer entity (PF or PJ)",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["PF", "PJ"] },
+        "name": { "type": "string", "maxLength": 200 },
+        "document": { "type": "string", "maxLength": 30 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "whatsapp": { "type": "string", "maxLength": 30 },
+        "email": { "type": "string", "maxLength": 100 },
+        "cep": { "type": "string", "maxLength": 10 },
+        "street": { "type": "string", "maxLength": 200 },
+        "number": { "type": "string", "maxLength": 20 },
+        "complement": { "type": "string", "maxLength": 100 },
+        "neighborhood": { "type": "string", "maxLength": 100 },
+        "city": { "type": "string", "maxLength": 100 },
+        "state": { "type": "string", "maxLength": 2 },
+        "birthDate": { "type": "string", "maxLength": 20 },
+        "source": { "type": "string", "maxLength": 50 },
+        "notes": { "type": "string", "maxLength": 2000 },
+        "tags": { "type": "array" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["name", "type"]
+    },
+    "Supplier": {
+      "title": "Supplier",
+      "description": "Supplier entity (PF or PJ)",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["PF", "PJ"] },
+        "name": { "type": "string", "maxLength": 200 },
+        "document": { "type": "string", "maxLength": 30 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "whatsapp": { "type": "string", "maxLength": 30 },
+        "email": { "type": "string", "maxLength": 100 },
+        "cep": { "type": "string", "maxLength": 10 },
+        "street": { "type": "string", "maxLength": 200 },
+        "number": { "type": "string", "maxLength": 20 },
+        "complement": { "type": "string", "maxLength": 100 },
+        "neighborhood": { "type": "string", "maxLength": 100 },
+        "city": { "type": "string", "maxLength": 100 },
+        "state": { "type": "string", "maxLength": 2 },
+        "contactPerson": { "type": "string", "maxLength": 100 },
+        "notes": { "type": "string", "maxLength": 2000 },
+        "tags": { "type": "array" }
+      },
+      "required": ["name", "type"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Financial income or expense transaction",
+      "type": "object",
+      "properties": {
+        "description": { "type": "string", "maxLength": 255 },
+        "amount": { "type": "number" },
+        "type": { "type": "string", "enum": ["income", "expense"] },
+        "date": { "type": "string" },
+        "dueDate": { "type": "string" },
+        "paymentDate": { "type": "string" },
+        "categoryId": { "type": "string" },
+        "paymentMethod": { "type": "string" },
+        "status": { "type": "string", "enum": ["paid", "pending", "overdue"] },
+        "entityType": { "type": "string", "enum": ["client", "supplier", "none"] },
+        "entityId": { "type": "string" },
+        "costCenter": { "type": "string" },
+        "accountId": { "type": "string" },
+        "notes": { "type": "string", "maxLength": 2000 },
+        "receiptUrl": { "type": "string" },
+        "isRecurring": { "type": "boolean" },
+        "installmentNumber": { "type": "number" },
+        "totalInstallments": { "type": "number" }
+      },
+      "required": ["description", "amount", "type", "dueDate", "categoryId", "paymentMethod", "status"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Catalog item (product or service)",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "maxLength": 50 },
+        "name": { "type": "string", "maxLength": 200 },
+        "type": { "type": "string", "enum": ["product", "service"] },
+        "costPrice": { "type": "number" },
+        "salePrice": { "type": "number" },
+        "marginPercent": { "type": "number" },
+        "stockQuantity": { "type": "number" },
+        "minStockQuantity": { "type": "number" },
+        "notes": { "type": "string", "maxLength": 1000 }
+      },
+      "required": ["name", "type", "salePrice"]
+    },
+    "Deal": {
+      "title": "Deal",
+      "description": "Sales opportunity card in CRM Kanban",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 200 },
+        "clientId": { "type": "string" },
+        "clientName": { "type": "string" },
+        "value": { "type": "number" },
+        "stageId": { "type": "string" },
+        "assignedToUserId": { "type": "string" },
+        "assignedToUserName": { "type": "string" },
+        "expectedCloseDate": { "type": "string" },
+        "priority": { "type": "string", "enum": ["low", "medium", "high"] },
+        "tags": { "type": "array" },
+        "lossReason": { "type": "string" },
+        "wonDate": { "type": "string" },
+        "lostDate": { "type": "string" }
+      },
+      "required": ["title", "stageId", "value"]
+    },
+    "Proposal": {
+      "title": "Proposal",
+      "description": "Commercial proposal or budget",
+      "type": "object",
+      "properties": {
+        "number": { "type": "string" },
+        "clientId": { "type": "string" },
+        "clientName": { "type": "string" },
+        "date": { "type": "string" },
+        "validUntil": { "type": "string" },
+        "status": { "type": "string", "enum": ["draft", "sent", "approved", "rejected"] },
+        "items": { "type": "array" },
+        "subtotal": { "type": "number" },
+        "discount": { "type": "number" },
+        "shipping": { "type": "number" },
+        "total": { "type": "number" },
+        "paymentConditions": { "type": "string" },
+        "notes": { "type": "string" }
+      },
+      "required": ["clientId", "status", "total"]
+    },
+    "Task": {
+      "title": "Task",
+      "description": "Calendar and to-do task item",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string" },
+        "dueDate": { "type": "string" },
+        "priority": { "type": "string", "enum": ["low", "medium", "high"] },
+        "status": { "type": "string", "enum": ["pending", "completed"] },
+        "assignedToUserId": { "type": "string" },
+        "clientId": { "type": "string" },
+        "dealId": { "type": "string" }
+      },
+      "required": ["title", "dueDate", "status"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Registered company users with assigned role"
+    },
+    "/company/profile": {
+      "schema": "CompanyProfile",
+      "description": "Company registration, branding, and details"
+    },
+    "/clients/{clientId}": {
+      "schema": { "$ref": "#/entities/Client" },
+      "description": "Customer accounts"
+    },
+    "/suppliers/{supplierId}": {
+      "schema": { "$ref": "#/entities/Supplier" },
+      "description": "Supplier accounts"
+    },
+    "/transactions/{transactionId}": {
+      "schema": { "$ref": "#/entities/Transaction" },
+      "description": "Accounts payable and receivable"
+    },
+    "/accounts/{accountId}": {
+      "schema": "Account",
+      "description": "Bank and cash accounts"
+    },
+    "/categories/{categoryId}": {
+      "schema": "Category",
+      "description": "Income and expense categories"
+    },
+    "/deals/{dealId}": {
+      "schema": { "$ref": "#/entities/Deal" },
+      "description": "CRM pipeline opportunities"
+    },
+    "/deal_interactions/{interactionId}": {
+      "schema": "Interaction",
+      "description": "Deal interaction timeline records"
+    },
+    "/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Product and service catalog items"
+    },
+    "/proposals/{proposalId}": {
+      "schema": { "$ref": "#/entities/Proposal" },
+      "description": "Commercial proposals and estimates"
+    },
+    "/tasks/{taskId}": {
+      "schema": { "$ref": "#/entities/Task" },
+      "description": "Tasks and schedule items"
+    },
+    "/audit_logs/{logId}": {
+      "schema": "AuditLog",
+      "description": "Audit trails for operations"
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Gestor Pro - CRM e Gestão Financeira",
+  "description": "Sistema completo de CRM e gestão financeira empresarial para pequenas e médias empresas.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
